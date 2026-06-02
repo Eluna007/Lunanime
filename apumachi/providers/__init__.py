@@ -1,11 +1,7 @@
 from .allmanga_provider import AllMangaProvider
-from .animepahe_provider import AnimePaheProvider
-from .gogoanime_provider import GogoAnimeProvider
 
 PROVIDERS = {
     "allmanga": AllMangaProvider,
-    "animepahe": AnimePaheProvider,
-    "gogoanime": GogoAnimeProvider,
 }
 
 def get_provider(name: str):
