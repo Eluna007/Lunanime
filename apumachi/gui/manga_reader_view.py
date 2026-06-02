@@ -179,7 +179,11 @@ class MangaReaderView(QWidget):
 
         if self._pages_worker and self._pages_worker.isRunning():
             self._pages_worker.terminate()
-        self._pages_worker = MangaPagesWorker(chapter.chapter_id, self._data_saver)
+        self._pages_worker = MangaPagesWorker(
+            chapter.chapter_id, self._data_saver,
+            manga_id=self._manga.manga_id if self._manga else "",
+            lang=chapter.lang,
+        )
         self._pages_worker.results_ready.connect(self._on_pages)
         self._pages_worker.error.connect(lambda e: self._on_error(e))
         self._pages_worker.start()

@@ -21,7 +21,25 @@ from anipy_api.provider.base import (
 from anipy_api.provider.filter import FilterCapabilities, Filters, Status
 from anipy_api.provider.utils import parsenum
 
-BASE_URL = "https://kickassanime.com.es"
+_CANDIDATE_DOMAINS = [
+    "https://kickassanime.am",
+    "https://kickassanime.mx",
+    "https://kickassanime.com.es",
+]
+
+def _resolve_base_url() -> str:
+    import requests
+    for domain in _CANDIDATE_DOMAINS:
+        try:
+            r = requests.get(f"{domain}/api/search?q=test", timeout=5,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code < 500:
+                return domain
+        except Exception:
+            continue
+    return _CANDIDATE_DOMAINS[0]
+
+BASE_URL = _CANDIDATE_DOMAINS[0]
 API_BASE = f"{BASE_URL}/api"
 
 HEADERS = {
@@ -36,9 +54,10 @@ class KickAssAnimeProvider(BaseProvider):
     FILTER_CAPS = FilterCapabilities.NO_QUERY
 
     def get_search(self, query: str, filters: Filters = Filters()) -> List[ProviderSearchResult]:
+        base = _resolve_base_url()
         req = Request(
             "GET",
-            f"{API_BASE}/search",
+            f"{base}/api/search",
             params={"q": query, "page": 1},
             headers=HEADERS,
         )
@@ -66,9 +85,10 @@ class KickAssAnimeProvider(BaseProvider):
         return results
 
     def get_info(self, identifier: str) -> ProviderInfoResult:
+        base = _resolve_base_url()
         req = Request(
             "GET",
-            f"{API_BASE}/show/{identifier}",
+            f"{base}/api/show/{identifier}",
             headers=HEADERS,
         )
         try:
@@ -98,11 +118,12 @@ class KickAssAnimeProvider(BaseProvider):
 
     def get_episodes(self, identifier: str, lang: LanguageTypeEnum) -> List[Episode]:
         episodes = []
+        base = _resolve_base_url()
         page = 1
         while True:
             req = Request(
                 "GET",
-                f"{API_BASE}/show/{identifier}/episodes",
+                f"{base}/api/show/{identifier}/episodes",
                 params={"page": page, "ep_details": 1},
                 headers=HEADERS,
             )
@@ -131,10 +152,10 @@ class KickAssAnimeProvider(BaseProvider):
 
     def get_video(self, identifier: str, episode: Episode, lang: LanguageTypeEnum) -> List[ProviderStream]:
         ep_slug = f"episode-{int(episode)}" if episode == int(episode) else f"episode-{episode}"
-
+        base = _resolve_base_url()
         req = Request(
             "GET",
-            f"{API_BASE}/show/{identifier}/{ep_slug}",
+            f"{base}/api/show/{identifier}/{ep_slug}",
             headers=HEADERS,
         )
         try:

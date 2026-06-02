@@ -22,7 +22,25 @@ from anipy_api.provider.base import (
 from anipy_api.provider.filter import FilterCapabilities, Filters, Status
 from anipy_api.provider.utils import parsenum
 
-BASE_URL = "https://www.animeunity.so"
+_CANDIDATE_DOMAINS = [
+    "https://www.animeunity.to",
+    "https://www.animeunity.so",
+    "https://www.animeunity.tv",
+]
+
+def _resolve_base_url() -> str:
+    import requests
+    for domain in _CANDIDATE_DOMAINS:
+        try:
+            r = requests.get(domain, timeout=5,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code < 500:
+                return domain
+        except Exception:
+            continue
+    return _CANDIDATE_DOMAINS[0]
+
+BASE_URL = _CANDIDATE_DOMAINS[0]
 API_URL = f"{BASE_URL}/archivio"
 
 HEADERS = {
@@ -37,13 +55,17 @@ class AnimeUnityProvider(BaseProvider):
     BASE_URL = BASE_URL
     FILTER_CAPS = FilterCapabilities.NO_QUERY
 
+    def _base(self) -> str:
+        return _resolve_base_url()
+
     def _api_request(self, endpoint: str, params: dict = None, data: dict = None):
+        base = self._base()
         req = Request(
             "POST" if data else "GET",
-            f"{BASE_URL}{endpoint}",
+            f"{base}{endpoint}",
             params=params,
             json=data,
-            headers=HEADERS,
+            headers={**HEADERS, "Referer": base + "/"},
         )
         return self._request_page(req)
 
@@ -77,7 +99,8 @@ class AnimeUnityProvider(BaseProvider):
         return results
 
     def get_info(self, identifier: str) -> ProviderInfoResult:
-        req = Request("GET", f"{BASE_URL}/anime/{identifier}", headers=HEADERS)
+        base = self._base()
+        req = Request("GET", f"{base}/anime/{identifier}", headers={**HEADERS, "Referer": base + "/"})
         try:
             res = self._request_page(req)
             soup = BeautifulSoup(res.text, "html.parser")
@@ -92,7 +115,7 @@ class AnimeUnityProvider(BaseProvider):
         img_tag = soup.select_one(".cover img, .poster img, img[alt*='cover']")
         if img_tag:
             src = img_tag.get("src") or img_tag.get("data-src", "")
-            info.image = src if src.startswith("http") else BASE_URL + src
+            info.image = src if src.startswith("http") else self._base() + src
 
         desc_tag = soup.select_one(".description, .synopsis, p.plot")
         info.synopsis = desc_tag.get_text(strip=True) if desc_tag else None
@@ -115,7 +138,8 @@ class AnimeUnityProvider(BaseProvider):
         return info
 
     def get_episodes(self, identifier: str, lang: LanguageTypeEnum) -> List[Episode]:
-        req = Request("GET", f"{BASE_URL}/anime/{identifier}", headers=HEADERS)
+        base = self._base()
+        req = Request("GET", f"{base}/anime/{identifier}", headers={**HEADERS, "Referer": base + "/"})
         try:
             res = self._request_page(req)
         except Exception:
@@ -150,10 +174,11 @@ class AnimeUnityProvider(BaseProvider):
 
     def get_video(self, identifier: str, episode: Episode, lang: LanguageTypeEnum) -> List[ProviderStream]:
         ep_num = int(episode) if episode == int(episode) else episode
+        base = self._base()
         req = Request(
             "GET",
-            f"{BASE_URL}/anime/{identifier}/episode-{ep_num}",
-            headers=HEADERS,
+            f"{base}/anime/{identifier}/episode-{ep_num}",
+            headers={**HEADERS, "Referer": base + "/"},
         )
         try:
             res = self._request_page(req)
@@ -167,7 +192,7 @@ class AnimeUnityProvider(BaseProvider):
         if video_match:
             url = video_match.group(1).replace("\\/", "/")
             try:
-                hls_req = Request("GET", url, headers={"Referer": BASE_URL + "/"})
+                hls_req = Request("GET", url, headers={"Referer": base + "/"})
                 hls_res = self._request_page(hls_req)
                 content = m3u8.M3U8(hls_res.text, base_uri=urljoin(url, "."))
                 if content.playlists:
@@ -177,7 +202,7 @@ class AnimeUnityProvider(BaseProvider):
                             resolution=pl.stream_info.resolution[1] if pl.stream_info.resolution else 720,
                             episode=episode,
                             language=lang,
-                            referrer=BASE_URL,
+                            referrer=base,
                         ))
                     return streams
             except Exception:
@@ -185,7 +210,7 @@ class AnimeUnityProvider(BaseProvider):
             streams.append(ProviderStream(
                 url=url, resolution=1080,
                 episode=episode, language=lang,
-                referrer=BASE_URL,
+                referrer=base,
             ))
 
         # Fallback: look for scws embed
@@ -195,7 +220,7 @@ class AnimeUnityProvider(BaseProvider):
             streams.append(ProviderStream(
                 url=embed_url, resolution=1080,
                 episode=episode, language=lang,
-                referrer=BASE_URL,
+                referrer=base,
             ))
 
         return streams

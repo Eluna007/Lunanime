@@ -339,7 +339,16 @@ class TrackingWorker(QThread):
             pass
 
 
-# ── MangaDex workers ──────────────────────────────────────────────────────────
+# ── AllManga manga workers ────────────────────────────────────────────────────
+
+_AM_API   = "https://api.allanime.day/api"
+_AM_REF   = "https://allmanga.to/"
+
+_AM_SEARCH_HASH   = "a24c500a1b765c68ae1d8dd85174931f661c71369c89b92b88b75a725afc471c"
+_AM_DETAILS_HASH  = "043448386c7a686bc2aabfbb6b80f6074e795d350df48015023b079527b0848a"
+_AM_CHAPTERS_HASH = "b08f9a5e0df79ef28d2c6aab09b7d1e299ed3e94f3c2b3c2bf5d2b1f77e5d37c"
+_AM_PAGES_HASH    = "a9f84027b57d48b9d8baf46c3a7b68eca5f9b827c37de95e5b1a1ef9fd1db7e3"
+
 
 class MangaResult:
     def __init__(self, manga_id, title, description, cover_url, status, tags):
@@ -359,35 +368,62 @@ class MangaChapter:
         self.chapter_num = chapter_num
         self.title       = title
         self.lang        = lang
-        self.pages       = pages    # int count (filled after page fetch)
+        self.pages       = pages
         self.scanlator   = scanlator
 
 
-_MDX = "https://api.mangadex.org"
-_CDN = "https://uploads.mangadex.org"
+def _am_post(variables: dict, hash_: str) -> dict:
+    import json, requests
+    params = {
+        "variables": json.dumps(variables),
+        "extensions": json.dumps({"persistedQuery": {"version": 1, "sha256Hash": hash_}}),
+    }
+    r = requests.get(_AM_API, params=params,
+                     headers={"Referer": _AM_REF}, timeout=15)
+    r.raise_for_status()
+    return r.json()
 
 
 class MangaSearchWorker(QThread):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, query: str, limit: int = 20):
+    def __init__(self, query: str, limit: int = 26):
         super().__init__()
         self.query = query
         self.limit = limit
 
     def run(self):
         try:
-            import requests
-            params = {
-                "title": self.query, "limit": self.limit,
-                "contentRating[]": ["safe", "suggestive"],
-                "includes[]": ["cover_art"],
-                "order[relevance]": "desc",
-            }
-            r = requests.get(f"{_MDX}/manga", params=params, timeout=15)
-            r.raise_for_status()
-            self.results_ready.emit(_parse_manga_list(r.json()["data"]))
+            results = []
+            page = 1
+            while True:
+                data = _am_post({
+                    "search": {"query": self.query, "isManga": True},
+                    "limit": self.limit,
+                    "page": page,
+                    "translationType": "scan",
+                    "countryOrigin": "ALL",
+                }, _AM_SEARCH_HASH)
+                edges = data.get("data", {}).get("shows", {}).get("edges", [])
+                if not edges:
+                    break
+                for item in edges:
+                    thumbnail = item.get("thumbnail") or ""
+                    if thumbnail and not thumbnail.startswith("http"):
+                        thumbnail = "https://cdn.allanime.day/" + thumbnail.lstrip("/")
+                    results.append(MangaResult(
+                        manga_id=item["_id"],
+                        title=item.get("name", ""),
+                        description=(item.get("description") or "")[:400],
+                        cover_url=thumbnail,
+                        status=item.get("status", ""),
+                        tags=(item.get("genres") or [])[:6],
+                    ))
+                page += 1
+                if page > 3:
+                    break
+            self.results_ready.emit(results)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -403,79 +439,75 @@ class MangaChaptersWorker(QThread):
 
     def run(self):
         try:
-            import requests
-            chapters, offset, limit = [], 0, 100
-            while True:
-                r = requests.get(f"{_MDX}/manga/{self.manga_id}/feed", params={
-                    "translatedLanguage[]": [self.lang],
-                    "order[chapter]": "asc",
-                    "limit": limit, "offset": offset,
-                    "includes[]": ["scanlation_group"],
-                    "contentRating[]": ["safe", "suggestive", "erotica"],
-                }, timeout=15)
-                r.raise_for_status()
-                data = r.json()
-                batch = data["data"]
-                for ch in batch:
-                    attrs = ch["attributes"]
-                    num   = attrs.get("chapter") or "?"
-                    title = attrs.get("title") or ""
-                    lang  = attrs.get("translatedLanguage", "en")
-                    pages = attrs.get("pages", 0)
-                    group = ""
-                    for rel in ch.get("relationships", []):
-                        if rel["type"] == "scanlation_group":
-                            group = rel.get("attributes", {}).get("name", "") or ""
-                    chapters.append(MangaChapter(ch["id"], num, title, lang, pages, group))
-                offset += len(batch)
-                if offset >= data["total"] or len(batch) < limit:
-                    break
+            data = _am_post({"_id": self.manga_id}, _AM_DETAILS_HASH)
+            show = data["data"]["show"]
+            raw = show.get("availableChaptersDetail", {})
+            # chapters keyed by "sub"/"scan" — use "sub" as primary
+            chapter_list = raw.get("sub") or raw.get("scan") or raw.get("dub") or []
+            chapters = []
+            for ch_str in chapter_list:
+                chapters.append(MangaChapter(
+                    chapter_id=ch_str,
+                    chapter_num=ch_str,
+                    title="",
+                    lang=self.lang,
+                    pages=0,
+                    scanlator="",
+                ))
+            # Sort numerically where possible
+            def _sort_key(c):
+                try:
+                    return float(c.chapter_num)
+                except ValueError:
+                    return 0.0
+            chapters.sort(key=_sort_key)
             self.results_ready.emit(chapters)
         except Exception as e:
             self.error.emit(str(e))
 
 
 class MangaPagesWorker(QThread):
-    results_ready = pyqtSignal(list)   # list of page URLs
+    results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, chapter_id: str, data_saver: bool = False):
+    def __init__(self, chapter_id: str, data_saver: bool = False,
+                 manga_id: str = "", lang: str = "en"):
         super().__init__()
         self.chapter_id = chapter_id
         self.data_saver = data_saver
+        self.manga_id   = manga_id
+        self.lang       = lang
 
     def run(self):
         try:
-            import requests
-            r = requests.get(f"{_MDX}/at-home/server/{self.chapter_id}", timeout=15)
-            r.raise_for_status()
-            d = r.json()
-            base  = d["baseUrl"]
-            ch    = d["chapter"]
-            mode  = "data-saver" if self.data_saver else "data"
-            files = ch["dataSaver"] if self.data_saver else ch["data"]
-            hash_ = ch["hash"]
-            urls  = [f"{base}/{mode}/{hash_}/{f}" for f in files]
+            data = _am_post({
+                "showId": self.manga_id,
+                "chapterString": self.chapter_id,
+                "translationType": "scan",
+            }, _AM_PAGES_HASH)
+            episode = data["data"]["episode"]
+            source_urls = episode.get("sourceUrls", [])
+            urls = []
+            for src in source_urls:
+                raw_url = src.get("sourceUrl", "")
+                if not raw_url:
+                    continue
+                # Decrypt if it looks like a hex-encoded path
+                if all(c in "0123456789abcdefABCDEF" for c in raw_url.replace("--", "")):
+                    import requests, json as _json
+                    from apumachi.providers.allmanga_provider import _decrypt_source
+                    path = _decrypt_source(raw_url.replace("--", ""))
+                    r = requests.get(
+                        f"https://allanime.day{path}",
+                        headers={"Referer": _AM_REF}, timeout=15,
+                    )
+                    if r.ok:
+                        for link_obj in r.json().get("links", []):
+                            link = link_obj.get("link", "")
+                            if link:
+                                urls.append(link)
+                else:
+                    urls.append(raw_url)
             self.results_ready.emit(urls)
         except Exception as e:
             self.error.emit(str(e))
-
-
-def _parse_manga_list(data: list) -> list:
-    results = []
-    for m in data:
-        attrs = m["attributes"]
-        title = (attrs.get("title", {}).get("en")
-                 or next(iter(attrs.get("title", {}).values()), "Unknown"))
-        desc  = (attrs.get("description", {}).get("en") or "")[:400]
-        status = attrs.get("status", "")
-        tags  = [t["attributes"]["name"].get("en", "")
-                 for t in attrs.get("tags", [])][:6]
-        cover_url = ""
-        for rel in m.get("relationships", []):
-            if rel["type"] == "cover_art" and rel.get("attributes"):
-                fn = rel["attributes"].get("fileName", "")
-                cover_url = f"{_CDN}/covers/{m['id']}/{fn}.256.jpg"
-                break
-        results.append(MangaResult(m["id"], title, desc, cover_url, status, tags))
-    return results
