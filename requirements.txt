@@ -7,3 +7,4 @@ pycountry>=23.12
 simpleeval>=0.9
 pycryptodomex>=3.20
 requests>=2.31
+cloudscraper>=2.3
