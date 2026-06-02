@@ -640,35 +640,48 @@ class WeebCentralSearchWorker(QThread):
             from bs4 import BeautifulSoup
             session = _wc_session()
 
-            # Use the full search page — more reliable than the HTMX fragment endpoint
+            # WeebCentral uses HTMX — results come from /search/data, not the shell page
             r = session.get(
-                f"{_WC_BASE}/search",
-                params={"text": self.query},
+                f"{_WC_BASE}/search/data",
+                params={
+                    "text": self.query,
+                    "limit": self.limit,
+                    "offset": 0,
+                    "sort": "Best Match",
+                    "order": "asc",
+                    "official": "Any",
+                    "display_mode": "Minimal Display",
+                },
+                headers={
+                    "HX-Request": "true",
+                    "HX-Target": "search-results",
+                    "HX-Current-URL": f"{_WC_BASE}/search",
+                    "Referer": f"{_WC_BASE}/search",
+                    "Accept": "text/html, */*",
+                },
                 timeout=15,
             )
             r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
 
+            soup = BeautifulSoup(r.text, "html.parser")
             results = []
             seen = set()
 
-            # Each result card is an <a> wrapping image + title inside a list/grid
             for a in soup.select("a[href*='/series/']"):
                 href = a.get("href", "")
-                m = re.search(r'/series/([A-Z0-9]+)', href)
+                m = re.search(r'/series/([^/?#]+)', href)
                 if not m:
                     continue
                 mid = m.group(1)
-                if mid in seen:
+                if mid in seen or mid.lower() == "random":
                     continue
                 seen.add(mid)
                 img = a.find("img")
                 cover = (img.get("src") or img.get("data-src", "")) if img else ""
-                title = (img.get("alt", "") if img else "") or a.get("title", "") or a.get_text(strip=True) or mid
-                # skip nav/genre links that happen to have /series/ in href
-                if len(title) < 2 or title.lower() in ("series", "all"):
+                title = (img.get("alt", "").strip() if img else "") or a.get("title", "").strip() or a.get_text(strip=True) or mid
+                if len(title) < 2:
                     continue
-                results.append(MangaResult(mid, title.strip(), "", cover, "", []))
+                results.append(MangaResult(mid, title, "", cover, "", []))
                 if len(results) >= self.limit:
                     break
 

@@ -15,26 +15,34 @@ from pathlib import Path
 
 
 def _find_firefox_profile() -> Path | None:
-    ff_dir = Path.home() / ".mozilla" / "firefox"
-    if not ff_dir.exists():
-        return None
+    home = Path.home()
+    candidates = [
+        home / ".mozilla" / "firefox",
+        home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
+        home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+        home / ".var" / "app" / "org.mozilla.firefox" / "data" / "profiles",
+    ]
 
-    ini = ff_dir / "profiles.ini"
-    if ini.exists():
-        cfg = ConfigParser()
-        cfg.read(ini)
-        for section in cfg.sections():
-            if cfg.get(section, "Default", fallback="0") == "1":
-                rel = cfg.get(section, "IsRelative", fallback="1")
-                path = cfg.get(section, "Path", fallback="")
-                if path:
-                    p = (ff_dir / path) if rel == "1" else Path(path)
-                    if (p / "cookies.sqlite").exists():
-                        return p
+    for ff_dir in candidates:
+        if not ff_dir.exists():
+            continue
 
-    for p in ff_dir.iterdir():
-        if p.is_dir() and (p / "cookies.sqlite").exists():
-            return p
+        ini = ff_dir / "profiles.ini"
+        if ini.exists():
+            cfg = ConfigParser()
+            cfg.read(ini)
+            for section in cfg.sections():
+                if cfg.get(section, "Default", fallback="0") == "1":
+                    rel = cfg.get(section, "IsRelative", fallback="1")
+                    path = cfg.get(section, "Path", fallback="")
+                    if path:
+                        p = (ff_dir / path) if rel == "1" else Path(path)
+                        if (p / "cookies.sqlite").exists():
+                            return p
+
+        for p in ff_dir.iterdir():
+            if p.is_dir() and (p / "cookies.sqlite").exists():
+                return p
 
     return None
 
