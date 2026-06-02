@@ -16,14 +16,29 @@ from pathlib import Path
 
 def _find_firefox_profile() -> Path | None:
     home = Path.home()
-    candidates = [
+    uid = os.getuid()
+
+    # Profile-sync-daemon (CachyOS/Arch) keeps the live profile in RAM — freshest cookies
+    psd_dir = Path(f"/run/user/{uid}/psd")
+    if psd_dir.exists():
+        # Prefer the -rw (read-write) copy, fall back to the plain copy
+        for p in sorted(psd_dir.iterdir(), key=lambda x: x.name, reverse=True):
+            if (p / "cookies.sqlite").exists() and "firefox" in p.name:
+                if p.name.endswith("-rw"):
+                    return p
+        for p in psd_dir.iterdir():
+            if (p / "cookies.sqlite").exists() and "firefox" in p.name:
+                return p
+
+    # Standard profile directories (newest-first: CachyOS uses ~/.config)
+    ff_dirs = [
+        home / ".config" / "mozilla" / "firefox",
         home / ".mozilla" / "firefox",
         home / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
         home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
-        home / ".var" / "app" / "org.mozilla.firefox" / "data" / "profiles",
     ]
 
-    for ff_dir in candidates:
+    for ff_dir in ff_dirs:
         if not ff_dir.exists():
             continue
 
@@ -40,9 +55,12 @@ def _find_firefox_profile() -> Path | None:
                         if (p / "cookies.sqlite").exists():
                             return p
 
-        for p in ff_dir.iterdir():
-            if p.is_dir() and (p / "cookies.sqlite").exists():
-                return p
+        # Fallback: pick the most recently modified profile dir
+        profiles = [p for p in ff_dir.iterdir()
+                    if p.is_dir() and (p / "cookies.sqlite").exists()
+                    and "backup" not in p.name]
+        if profiles:
+            return max(profiles, key=lambda p: p.stat().st_mtime)
 
     return None
 
