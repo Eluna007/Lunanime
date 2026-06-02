@@ -14,8 +14,9 @@ from PyQt6.QtGui import QPixmap
 from .anime_card import AnimeCard
 from .workers import (MangaSearchWorker, MangaChaptersWorker,
                       ImageWorker, MangaResult, MangaChapter,
-                      ComickSearchWorker, ComickChaptersWorker, ComickPagesWorker,
-                      WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralPagesWorker)
+                      WeebCentralSearchWorker, WeebCentralMetaWorker,
+                      WeebCentralChaptersWorker, WeebCentralPagesWorker,
+                      MangaFireSearchWorker, MangaFireChaptersWorker, MangaFirePagesWorker)
 from .. import db
 
 
@@ -26,6 +27,7 @@ class MangaView(QWidget):
         super().__init__(parent)
         self._search_worker   = None
         self._chapters_worker = None
+        self._meta_worker     = None
         self._current_manga   = None
         self._chapters        = []
         self._source          = "mangadex"
@@ -59,8 +61,8 @@ class MangaView(QWidget):
 
         self._source_combo = QComboBox()
         self._source_combo.addItem("MangaDex", "mangadex")
-        self._source_combo.addItem("Comick", "comick")
         self._source_combo.addItem("WeebCentral", "weebcentral")
+        self._source_combo.addItem("MangaFire", "mangafire")
         self._source_combo.setFixedWidth(120)
         self._source_combo.currentIndexChanged.connect(self._on_source_changed)
         bar.addWidget(self._source_combo)
@@ -165,7 +167,7 @@ class MangaView(QWidget):
 
     def _on_source_changed(self):
         self._source = self._source_combo.currentData()
-        names = {"mangadex": "MangaDex", "comick": "Comick", "weebcentral": "WeebCentral"}
+        names = {"mangadex": "MangaDex", "weebcentral": "WeebCentral", "mangafire": "MangaFire"}
         self._search_input.setPlaceholderText(f"Search manga on {names.get(self._source, self._source)}…")
         self._clear_results()
         self._current_manga = None
@@ -177,14 +179,14 @@ class MangaView(QWidget):
         if not query:
             return
         self._clear_results()
-        source_name = {"mangadex": "MangaDex", "comick": "Comick", "weebcentral": "WeebCentral"}.get(self._source, self._source)
+        source_name = {"mangadex": "MangaDex", "weebcentral": "WeebCentral", "mangafire": "MangaFire"}.get(self._source, self._source)
         self._status.setText(f"Searching {source_name}…")
         if self._search_worker and self._search_worker.isRunning():
             self._search_worker.terminate()
-        if self._source == "comick":
-            self._search_worker = ComickSearchWorker(query)
-        elif self._source == "weebcentral":
+        if self._source == "weebcentral":
             self._search_worker = WeebCentralSearchWorker(query)
+        elif self._source == "mangafire":
+            self._search_worker = MangaFireSearchWorker(query)
         else:
             self._search_worker = MangaSearchWorker(query)
         self._search_worker.results_ready.connect(self._on_results)
@@ -218,11 +220,26 @@ class MangaView(QWidget):
         self._manga_tags.setText("  ·  ".join(manga.tags))
         self._cover_label.setText("Loading…")
         self._cover_label.setPixmap(QPixmap())
-        if manga.cover_url:
+        if self._source == "weebcentral":
+            mw = WeebCentralMetaWorker(manga.manga_id)
+            mw.meta_ready.connect(self._on_wc_meta)
+            mw.start()
+            self._meta_worker = mw
+        elif manga.cover_url:
             w = ImageWorker(manga.cover_url)
             w.image_ready.connect(self._set_cover)
             w.start()
         self._reload_chapters()
+
+    def _on_wc_meta(self, cover_url: str, description: str):
+        if description and self._current_manga:
+            self._manga_desc.setText(description)
+        if cover_url:
+            w = ImageWorker(cover_url)
+            w.image_ready.connect(self._set_cover)
+            w.start()
+        else:
+            self._cover_label.setText("No cover")
 
     def _set_cover(self, data: bytes):
         pix = QPixmap()
@@ -240,10 +257,10 @@ class MangaView(QWidget):
         lang = self._lang_combo.currentData()
         if self._chapters_worker and self._chapters_worker.isRunning():
             self._chapters_worker.terminate()
-        if self._source == "comick":
-            self._chapters_worker = ComickChaptersWorker(self._current_manga.manga_id, lang)
-        elif self._source == "weebcentral":
+        if self._source == "weebcentral":
             self._chapters_worker = WeebCentralChaptersWorker(self._current_manga.manga_id, lang)
+        elif self._source == "mangafire":
+            self._chapters_worker = MangaFireChaptersWorker(self._current_manga.manga_id, lang)
         else:
             self._chapters_worker = MangaChaptersWorker(self._current_manga.manga_id, lang)
         self._chapters_worker.results_ready.connect(self._on_chapters)

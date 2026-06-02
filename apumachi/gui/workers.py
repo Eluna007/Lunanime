@@ -2,6 +2,10 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 from anipy_api.provider.base import LanguageTypeEnum
 
+# In-memory image cache shared across all ImageWorker instances
+_IMAGE_CACHE: dict[str, bytes] = {}
+_IMAGE_CACHE_MAX = 200
+
 
 class SearchWorker(QThread):
     results_ready = pyqtSignal(list)
@@ -88,6 +92,9 @@ class ImageWorker(QThread):
         self.url = url
 
     def run(self):
+        if self.url in _IMAGE_CACHE:
+            self.image_ready.emit(_IMAGE_CACHE[self.url])
+            return
         try:
             import requests
             res = requests.get(self.url, timeout=10, headers={
@@ -95,6 +102,10 @@ class ImageWorker(QThread):
                 "Referer": self.url,
             })
             if res.ok:
+                if len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
+                    # evict oldest entry
+                    _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)))
+                _IMAGE_CACHE[self.url] = res.content
                 self.image_ready.emit(res.content)
         except Exception:
             pass
@@ -610,14 +621,8 @@ _WC_BASE = "https://weebcentral.com"
 
 
 def _wc_session():
-    try:
-        import cloudscraper
-        return cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-    except ImportError:
-        import requests
-        s = requests.Session()
-        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"})
-        return s
+    from apumachi.firefox_cookies import make_session
+    return make_session("weebcentral.com", {"Referer": _WC_BASE + "/"})
 
 
 class WeebCentralSearchWorker(QThread):
@@ -632,56 +637,100 @@ class WeebCentralSearchWorker(QThread):
     def run(self):
         try:
             import re
+            import requests as _requests
             from bs4 import BeautifulSoup
-            session = _wc_session()
+            from apumachi.firefox_cookies import _FF_UA
 
-            # /search/data returns an HTML fragment (HTMX), not JSON
-            r = session.get(
+            # WeebCentral doesn't need cookies (returns 200 without them).
+            # Use plain requests — curl-cffi impersonate strips custom HTMX headers.
+            s = _requests.Session()
+            s.headers.update({
+                "User-Agent": _FF_UA,
+                "HX-Request": "true",
+                "HX-Target": "search-results",
+                "HX-Current-URL": f"{_WC_BASE}/search",
+                "Referer": f"{_WC_BASE}/search",
+                "Accept": "text/html, */*",
+            })
+            r = s.get(
                 f"{_WC_BASE}/search/data",
-                params={"text": self.query, "limit": self.limit, "offset": 0,
-                        "sort": "Best Match", "order": "asc", "official": "Any"},
-                headers={"HX-Request": "true", "Accept": "text/html,*/*"},
+                params={"text": self.query, "author": "", "display_mode": "Minimal Display"},
                 timeout=15,
             )
             r.raise_for_status()
 
-            # Try JSON first (some mirrors return it)
+            # Results are <article> elements; title is in <a data-tip="...">
+            soup = BeautifulSoup(r.text, "html.parser")
             results = []
-            try:
-                data = r.json()
-                for m in data:
-                    mid = m.get("id") or m.get("slug") or ""
-                    title = m.get("title") or m.get("name") or mid
-                    if not mid:
-                        continue
-                    cover = m.get("cover") or m.get("cover_url") or m.get("image") or ""
-                    desc = (m.get("description") or m.get("synopsis") or "")[:400]
-                    status = m.get("status") or ""
-                    tags = m.get("genres") or m.get("tags") or []
-                    if isinstance(tags, list) and tags and isinstance(tags[0], dict):
-                        tags = [t.get("name", "") for t in tags]
-                    results.append(MangaResult(mid, str(title), desc, cover, status, tags[:6]))
-            except Exception:
-                # Parse the HTML fragment
-                soup = BeautifulSoup(r.text, "html.parser")
-                seen = set()
-                # WeebCentral search fragment: each result is an <a> linking to /series/{id}/...
-                for a in soup.select("a[href*='/series/']"):
-                    href = a.get("href", "")
-                    m = re.search(r'/series/([^/]+)', href)
-                    if not m:
-                        continue
-                    mid = m.group(1)
-                    if mid in seen:
-                        continue
-                    seen.add(mid)
-                    # title: prefer alt text of img, then text content
-                    img = a.find("img")
-                    title = (img.get("alt", "") if img else "") or a.get("title", "") or a.get_text(strip=True) or mid
-                    cover = img.get("src", "") if img else ""
-                    results.append(MangaResult(mid, title, "", cover, "", []))
+            for article in soup.select("article"):
+                a = article.select_one("a[href*='/series/']")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                m = re.search(r'/series/([^/?#]+)', href)
+                if not m:
+                    continue
+                mid = m.group(1)
+                if mid.lower() == "random":
+                    continue
+                title = a.get("data-tip", "").strip() or a.get_text(strip=True).strip() or mid
+                tags = [s.get_text(strip=True).rstrip(",") for s in article.select("section span")]
+                status_divs = article.select("section div")
+                status = next((d.get_text(strip=True).lower() for d in status_divs
+                               if d.get_text(strip=True).lower() in ("complete", "ongoing", "hiatus")), "")
+                results.append(MangaResult(mid, title, "", "", status, tags[:6]))
+                if len(results) >= self.limit:
+                    break
 
             self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class WeebCentralMetaWorker(QThread):
+    """Fetches cover URL and description for a WeebCentral series."""
+    meta_ready = pyqtSignal(str, str)   # cover_url, description
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str):
+        super().__init__()
+        self.manga_id = manga_id
+
+    def run(self):
+        try:
+            import requests as _requests
+            from bs4 import BeautifulSoup
+            from apumachi.firefox_cookies import _FF_UA
+
+            s = _requests.Session()
+            s.headers.update({
+                "User-Agent": _FF_UA,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                "Referer": _WC_BASE + "/",
+            })
+            r = s.get(f"{_WC_BASE}/series/{self.manga_id}", timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            cover_url = ""
+            og = soup.find("meta", property="og:image")
+            if og:
+                cover_url = og.get("content", "")
+            if not cover_url:
+                img = soup.select_one("section img, article img, .cover img, img.cover")
+                if img:
+                    cover_url = img.get("src", "") or img.get("data-src", "")
+
+            desc = ""
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc:
+                desc = og_desc.get("content", "").strip()
+            if not desc:
+                p = soup.select_one("section p, .description p, p.synopsis")
+                if p:
+                    desc = p.get_text(strip=True)
+
+            self.meta_ready.emit(cover_url, desc)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -762,27 +811,17 @@ class WeebCentralPagesWorker(QThread):
             self.error.emit(str(e))
 
 
-# ── Manganato workers ─────────────────────────────────────────────────────────
+# ── MangaFire workers ─────────────────────────────────────────────────────────
 
-_MNG_BASE = "https://www.manganato.gg"
-_MNG_CDN  = "https://chapmanganato.to"
-
-
-def _mng_session():
-    try:
-        import cloudscraper
-        s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-    except ImportError:
-        import requests
-        s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-        "Referer": _MNG_BASE + "/",
-    })
-    return s
+_MF_BASE = "https://mangafire.to"
 
 
-class ManganatSearchWorker(QThread):
+def _mf_session():
+    from apumachi.firefox_cookies import make_session
+    return make_session("mangafire.to", {"Referer": _MF_BASE + "/"})
+
+
+class MangaFireSearchWorker(QThread):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -795,24 +834,27 @@ class ManganatSearchWorker(QThread):
         try:
             import re
             from bs4 import BeautifulSoup
-            session = _mng_session()
-            slug = re.sub(r'[^a-z0-9]+', '_', self.query.lower()).strip('_')
-            r = session.get(f"{_MNG_BASE}/search/story/{slug}", timeout=15)
+            session = _mf_session()
+            r = session.get(f"{_MF_BASE}/filter",
+                            params={"keyword": self.query, "page": 1},
+                            timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
             results = []
-            for item in soup.select(".search-story-item, .list-story-item"):
-                a = item.select_one("h3 a, .item-title a, a.item-img")
+            for item in soup.select(".original.card-lg .unit, .manga-list .unit, .card"):
+                a = item.select_one("a[href*='/manga/']")
                 if not a:
                     continue
                 href = a.get("href", "")
-                manga_id = href.rstrip("/").split("/")[-1]
-                title = a.get_text(strip=True) or a.get("title", "") or manga_id
+                m = re.search(r'/manga/([^/?#]+)', href)
+                if not m:
+                    continue
+                manga_id = m.group(1)
                 img = item.select_one("img")
-                cover = img.get("src", "") if img else ""
-                desc_el = item.select_one(".text-nowrap3, .item-summary")
-                desc = desc_el.get_text(strip=True)[:400] if desc_el else ""
-                results.append(MangaResult(manga_id, title, desc, cover, "", []))
+                cover = img.get("src", "") or img.get("data-src", "") if img else ""
+                title_el = item.select_one(".title, h3, h2, .name")
+                title = title_el.get_text(strip=True) if title_el else manga_id
+                results.append(MangaResult(manga_id, title, "", cover, "", []))
                 if len(results) >= self.limit:
                     break
             self.results_ready.emit(results)
@@ -820,7 +862,7 @@ class ManganatSearchWorker(QThread):
             self.error.emit(str(e))
 
 
-class ManganatChaptersWorker(QThread):
+class MangaFireChaptersWorker(QThread):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -833,32 +875,37 @@ class ManganatChaptersWorker(QThread):
         try:
             import re
             from bs4 import BeautifulSoup
-            session = _mng_session()
-            r = session.get(f"{_MNG_BASE}/{self.manga_id}", timeout=15)
-            if r.status_code == 404:
-                r = session.get(f"{_MNG_CDN}/{self.manga_id}", timeout=15)
+            session = _mf_session()
+            r = session.get(f"{_MF_BASE}/manga/{self.manga_id}", timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
             chapters = []
-            for li in soup.select("ul.row-content-chapter li, .chapter-list li"):
-                a = li.select_one("a")
+            # MangaFire chapter list is in a #en-chapters (or #ja-chapters etc) div
+            lang_map = {"en": "en", "es": "es", "fr": "fr", "pt-br": "pt", "de": "de"}
+            lang_code = lang_map.get(self.lang, "en")
+            ch_container = soup.select_one(f"#{lang_code}-chapters, .chapter-list")
+            if not ch_container:
+                ch_container = soup
+            for li in ch_container.select("li, .item"):
+                a = li.select_one("a[href*='/read/']")
                 if not a:
                     continue
                 href = a.get("href", "")
-                ch_id = href  # full URL used as ID for pages lookup
-                text = a.get_text(strip=True)
-                m = re.search(r'[Cc]hapter\s+(\d+(?:\.\d+)?)', text)
-                num = m.group(1) if m else "?"
-                title_span = li.select_one(".chapter-name-last")
-                ch_title = title_span.get_text(strip=True) if title_span else ""
-                chapters.append(MangaChapter(href, num, ch_title, self.lang, 0, ""))
+                m = re.search(r'/read/([^/?#]+)/([^/?#]+)', href)
+                if not m:
+                    continue
+                ch_id = href  # full URL as ID
+                num_text = a.get_text(strip=True)
+                nm = re.search(r'(\d+(?:\.\d+)?)', num_text)
+                num = nm.group(1) if nm else "?"
+                chapters.append(MangaChapter(href, num, "", self.lang, 0, ""))
             chapters.reverse()
             self.results_ready.emit(chapters)
         except Exception as e:
             self.error.emit(str(e))
 
 
-class ManganatPagesWorker(QThread):
+class MangaFirePagesWorker(QThread):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -869,16 +916,26 @@ class ManganatPagesWorker(QThread):
 
     def run(self):
         try:
+            import re
             from bs4 import BeautifulSoup
-            session = _mng_session()
+            session = _mf_session()
             r = session.get(self.chapter_url, timeout=15)
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
             urls = []
-            for img in soup.select(".container-chapter-reader img, .chapter-content img"):
-                src = img.get("src", "")
+            # Pages are in a .reader-images container or similar
+            for img in soup.select(".reader-images img, #chapter-images img, .chapter-images img"):
+                src = img.get("src", "") or img.get("data-src", "")
                 if src:
                     urls.append(src)
+            if not urls:
+                # Fallback: look for JSON data in script tags
+                for script in soup.select("script"):
+                    text = script.string or ""
+                    matches = re.findall(r'"(https?://[^"]+\.(?:jpg|png|webp)[^"]*)"', text)
+                    urls.extend(matches)
+                    if urls:
+                        break
             self.results_ready.emit(urls)
         except Exception as e:
             self.error.emit(str(e))

@@ -1,25 +1,31 @@
 """
 Manga page reader — vertical scroll, lazy image loading.
 Navigation: prev/next chapter buttons, keyboard left/right, chapter selector.
+Zoom: +/- buttons, Ctrl+scroll, keyboard +/- and 0 to reset.
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QComboBox, QProgressBar, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QKeyEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint
+from PyQt6.QtGui import QPixmap, QKeyEvent, QWheelEvent
 
 from .workers import MangaPagesWorker, ImageWorker
 from .. import db
 
+_ZOOM_MIN = 0.3
+_ZOOM_MAX = 2.0
+_ZOOM_STEP = 0.1
+
 
 class _PageLabel(QLabel):
-    """Single manga page label that loads its image lazily."""
-    def __init__(self, url: str, reader_width: int):
+    """Single manga page label — lazy loads image, supports rescaling."""
+    def __init__(self, url: str):
         super().__init__()
         self._url = url
-        self._reader_width = reader_width
         self._loaded = False
+        self._raw: bytes | None = None
+        self._display_width = 800
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.setStyleSheet("background: #0a0a0a;")
         self.setMinimumHeight(60)
@@ -34,15 +40,26 @@ class _PageLabel(QLabel):
         w.start()
         self._iw = w
 
+    def rescale(self, width: int):
+        self._display_width = width
+        if self._raw:
+            self._render()
+
     def _set_image(self, data: bytes):
+        self._raw = data
+        self._render()
+
+    def _render(self):
+        if not self._raw:
+            return
         pix = QPixmap()
-        pix.loadFromData(data)
+        pix.loadFromData(self._raw)
         if pix.isNull():
             self.setText("⚠ Failed")
             return
         scaled = pix.scaledToWidth(
-            self._reader_width - 8,
-            Qt.TransformationMode.SmoothTransformation
+            max(1, self._display_width),
+            Qt.TransformationMode.SmoothTransformation,
         )
         self.setPixmap(scaled)
         self.setFixedHeight(scaled.height())
@@ -53,12 +70,14 @@ class MangaReaderView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._manga      = None
-        self._chapters   = []
-        self._chapter    = None
-        self._pages      = []
-        self._page_labels = []
+        self._manga        = None
+        self._chapters     = []
+        self._chapter      = None
+        self._pages        = []
+        self._page_labels  = []
         self._pages_worker = None
+        self._data_saver   = False
+        self._zoom         = 1.0
         self._setup_ui()
 
     def _setup_ui(self):
@@ -87,6 +106,35 @@ class MangaReaderView(QWidget):
         tb.addWidget(self._title_label)
 
         tb.addStretch()
+
+        # Zoom controls
+        zoom_out_btn = QPushButton("−")
+        zoom_out_btn.setProperty("flat", True)
+        zoom_out_btn.setFixedWidth(32)
+        zoom_out_btn.setToolTip("Zoom out (−)")
+        zoom_out_btn.clicked.connect(self._zoom_out)
+        tb.addWidget(zoom_out_btn)
+
+        self._zoom_label = QLabel("100%")
+        self._zoom_label.setFixedWidth(44)
+        self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_label.setStyleSheet("color:#9090a0; font-size:11px;")
+        self._zoom_label.mousePressEvent = lambda _: self._zoom_reset()
+        self._zoom_label.setToolTip("Click to reset zoom")
+        self._zoom_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        tb.addWidget(self._zoom_label)
+
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setProperty("flat", True)
+        zoom_in_btn.setFixedWidth(32)
+        zoom_in_btn.setToolTip("Zoom in (+)")
+        zoom_in_btn.clicked.connect(self._zoom_in)
+        tb.addWidget(zoom_in_btn)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet("color:#2a2a3a;")
+        tb.addWidget(sep)
 
         self._prev_btn = QPushButton("◀ Prev Ch")
         self._prev_btn.setProperty("flat", True)
@@ -144,12 +192,13 @@ class MangaReaderView(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def open(self, manga, chapters: list, chapter):
-        self._manga    = manga
-        self._chapters = chapters
-        self._chapter  = chapter
+        self._manga      = manga
+        self._chapters   = chapters
+        self._chapter    = chapter
         self._data_saver = False
+        self._zoom       = 1.0
+        self._zoom_label.setText("100%")
 
-        # Populate chapter combo
         self._ch_combo.blockSignals(True)
         self._ch_combo.clear()
         for ch in chapters:
@@ -157,7 +206,6 @@ class MangaReaderView(QWidget):
             if ch.title:
                 label += f" — {ch.title}"
             self._ch_combo.addItem(label, ch)
-        # Select current
         for i, ch in enumerate(chapters):
             if ch.chapter_id == chapter.chapter_id:
                 self._ch_combo.setCurrentIndex(i)
@@ -165,6 +213,30 @@ class MangaReaderView(QWidget):
         self._ch_combo.blockSignals(False)
 
         self._load_chapter(chapter)
+
+    # ── Zoom ─────────────────────────────────────────────────────────────────
+
+    def _effective_width(self) -> int:
+        vp_w = self._scroll.viewport().width() or 800
+        return max(1, int((vp_w - 8) * self._zoom))
+
+    def _apply_zoom(self):
+        self._zoom_label.setText(f"{int(self._zoom * 100)}%")
+        w = self._effective_width()
+        for lbl in self._page_labels:
+            lbl.rescale(w)
+
+    def _zoom_in(self):
+        self._zoom = min(_ZOOM_MAX, round(self._zoom + _ZOOM_STEP, 2))
+        self._apply_zoom()
+
+    def _zoom_out(self):
+        self._zoom = max(_ZOOM_MIN, round(self._zoom - _ZOOM_STEP, 2))
+        self._apply_zoom()
+
+    def _zoom_reset(self):
+        self._zoom = 1.0
+        self._apply_zoom()
 
     # ── Chapter loading ───────────────────────────────────────────────────────
 
@@ -179,6 +251,7 @@ class MangaReaderView(QWidget):
 
         if self._pages_worker and self._pages_worker.isRunning():
             self._pages_worker.terminate()
+
         source = getattr(self._manga, "source", "mangadex")
         if source == "comick":
             self._pages_worker = ComickPagesWorker(chapter.chapter_id, self._data_saver)
@@ -198,21 +271,18 @@ class MangaReaderView(QWidget):
         self._progress.setVisible(False)
         self._pages = urls
         self._page_labels = []
-        w = self._scroll.viewport().width() or 800
+        w = self._effective_width()
         for url in urls:
-            lbl = _PageLabel(url, w)
+            lbl = _PageLabel(url)
+            lbl.rescale(w)
             self._pages_layout.addWidget(lbl)
             self._page_labels.append(lbl)
-        # Load first few pages immediately
         for lbl in self._page_labels[:3]:
             lbl.load()
-        # Scroll to top
         self._scroll.verticalScrollBar().setValue(0)
-        # Mark chapter as read
         if self._manga and self._chapter:
             db.mark_chapter_read(self._manga.manga_id, self._chapter.chapter_id,
                                  self._chapter.chapter_num, self._manga.title)
-        # Update nav buttons
         idx = self._ch_combo.currentIndex()
         self._prev_btn.setEnabled(idx > 0)
         self._next_btn.setEnabled(idx < len(self._chapters) - 1)
@@ -262,12 +332,31 @@ class MangaReaderView(QWidget):
         if self._chapter:
             self._load_chapter(self._chapter)
 
+    # ── Input handling ────────────────────────────────────────────────────────
+
+    def wheelEvent(self, event: QWheelEvent):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.angleDelta().y() > 0:
+                self._zoom_in()
+            else:
+                self._zoom_out()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
     def keyPressEvent(self, event: QKeyEvent):
-        if event.key() in (Qt.Key.Key_Right, Qt.Key.Key_N):
+        k = event.key()
+        if k in (Qt.Key.Key_Right, Qt.Key.Key_N):
             self._go_next()
-        elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_P):
+        elif k in (Qt.Key.Key_Left, Qt.Key.Key_P):
             self._go_prev()
-        elif event.key() == Qt.Key.Key_Escape:
+        elif k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._zoom_in()
+        elif k == Qt.Key.Key_Minus:
+            self._zoom_out()
+        elif k == Qt.Key.Key_0:
+            self._zoom_reset()
+        elif k == Qt.Key.Key_Escape:
             self.back_requested.emit()
         else:
             super().keyPressEvent(event)
