@@ -189,6 +189,64 @@ class AniListWorker(QThread):
             self.error.emit(str(e))
 
 
+class JikanResult:
+    """Lightweight result from Jikan (MyAnimeList) API."""
+    def __init__(self, mal_id: int, name: str, image_url: str, score: float = 0.0, episodes: int = 0):
+        self.mal_id = mal_id
+        self.name = name
+        self.image_url = image_url
+        self.score = score
+        self.episodes = episodes
+
+
+class JikanWorker(QThread):
+    """Fetches seasonal anime from Jikan (unofficial MAL REST API, no auth)."""
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    _BASE = "https://api.jikan.moe/v4"
+
+    def __init__(self, mode: str = "now", season: str = None, year: int = None, limit: int = 25):
+        super().__init__()
+        self.mode = mode        # "now" (current season), "season" (specific), "top" (all-time popular)
+        self.season = season    # "winter"/"spring"/"summer"/"fall"
+        self.year = year
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests, time
+            if self.mode == "top":
+                url = f"{self._BASE}/top/anime"
+                params = {"limit": self.limit, "filter": "airing"}
+            elif self.mode == "season" and self.season and self.year:
+                url = f"{self._BASE}/seasons/{self.year}/{self.season.lower()}"
+                params = {"limit": self.limit}
+            else:
+                url = f"{self._BASE}/seasons/now"
+                params = {"limit": self.limit}
+
+            resp = requests.get(url, params=params, timeout=15,
+                                headers={"Accept": "application/json"})
+            # Jikan rate-limits: 3 req/s — retry once on 429
+            if resp.status_code == 429:
+                time.sleep(1)
+                resp = requests.get(url, params=params, timeout=15,
+                                    headers={"Accept": "application/json"})
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            results = []
+            for item in data[:self.limit]:
+                title = (item.get("title_english") or item.get("title") or "Unknown")
+                image = item.get("images", {}).get("jpg", {}).get("large_image_url", "")
+                score = item.get("score") or 0.0
+                episodes = item.get("episodes") or 0
+                results.append(JikanResult(item["mal_id"], title, image, score, episodes))
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class AutoPlayWorker(QThread):
     finished = pyqtSignal()
 
