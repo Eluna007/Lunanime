@@ -13,7 +13,10 @@ from PyQt6.QtGui import QPixmap
 
 from .anime_card import AnimeCard
 from .workers import (MangaSearchWorker, MangaChaptersWorker,
-                      ImageWorker, MangaResult, MangaChapter)
+                      ImageWorker, MangaResult, MangaChapter,
+                      ComickSearchWorker, ComickChaptersWorker, ComickPagesWorker,
+                      WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralPagesWorker,
+                      ManganatSearchWorker, ManganatChaptersWorker, ManganatPagesWorker)
 from .. import db
 
 
@@ -26,6 +29,7 @@ class MangaView(QWidget):
         self._chapters_worker = None
         self._current_manga   = None
         self._chapters        = []
+        self._source          = "mangadex"
         self._setup_ui()
 
     def _setup_ui(self):
@@ -53,6 +57,15 @@ class MangaView(QWidget):
         search_btn.setFixedWidth(90)
         search_btn.clicked.connect(self._do_search)
         bar.addWidget(search_btn)
+
+        self._source_combo = QComboBox()
+        self._source_combo.addItem("MangaDex", "mangadex")
+        self._source_combo.addItem("Comick", "comick")
+        self._source_combo.addItem("WeebCentral", "weebcentral")
+        self._source_combo.addItem("Manganato", "manganato")
+        self._source_combo.setFixedWidth(120)
+        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
+        bar.addWidget(self._source_combo)
 
         root.addWidget(bar_widget)
 
@@ -152,15 +165,32 @@ class MangaView(QWidget):
 
     # ── Search ────────────────────────────────────────────────────────────────
 
+    def _on_source_changed(self):
+        self._source = self._source_combo.currentData()
+        names = {"mangadex": "MangaDex", "comick": "Comick", "weebcentral": "WeebCentral", "manganato": "Manganato"}
+        self._search_input.setPlaceholderText(f"Search manga on {names.get(self._source, self._source)}…")
+        self._clear_results()
+        self._current_manga = None
+        self._ch_list.clear()
+        self._status.setText("Search for a manga title to get started.")
+
     def _do_search(self):
         query = self._search_input.text().strip()
         if not query:
             return
         self._clear_results()
-        self._status.setText("Searching MangaDex…")
+        source_name = {"mangadex": "MangaDex", "comick": "Comick", "weebcentral": "WeebCentral", "manganato": "Manganato"}.get(self._source, self._source)
+        self._status.setText(f"Searching {source_name}…")
         if self._search_worker and self._search_worker.isRunning():
             self._search_worker.terminate()
-        self._search_worker = MangaSearchWorker(query)
+        if self._source == "comick":
+            self._search_worker = ComickSearchWorker(query)
+        elif self._source == "weebcentral":
+            self._search_worker = WeebCentralSearchWorker(query)
+        elif self._source == "manganato":
+            self._search_worker = ManganatSearchWorker(query)
+        else:
+            self._search_worker = MangaSearchWorker(query)
         self._search_worker.results_ready.connect(self._on_results)
         self._search_worker.error.connect(lambda e: self._status.setText(f"Error: {e}"))
         self._search_worker.start()

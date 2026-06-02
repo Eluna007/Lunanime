@@ -479,3 +479,277 @@ def _parse_manga_list(data: list) -> list:
                 break
         results.append(MangaResult(m["id"], title, desc, cover_url, status, tags))
     return results
+
+
+# ── WeebCentral workers ───────────────────────────────────────────────────────
+
+_WC_BASE = "https://weebcentral.com"
+
+
+def _wc_session():
+    try:
+        import cloudscraper
+        return cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+    except ImportError:
+        import requests
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"})
+        return s
+
+
+class WeebCentralSearchWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            session = _wc_session()
+            r = session.get(
+                f"{_WC_BASE}/search/data",
+                params={"text": self.query, "limit": self.limit, "offset": 0,
+                        "sort": "Best Match", "order": "asc", "official": "Any"},
+                timeout=15,
+            )
+            r.raise_for_status()
+            # Response is JSON list of series
+            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else []
+            if not data:
+                # Fallback: HTML search page
+                from bs4 import BeautifulSoup
+                r2 = session.get(f"{_WC_BASE}/search", params={"text": self.query}, timeout=15)
+                soup = BeautifulSoup(r2.text, "html.parser")
+                data = []
+                for item in soup.select("a[href*='/series/']"):
+                    href = item.get("href", "")
+                    parts = [p for p in href.split("/") if p]
+                    if len(parts) < 2:
+                        continue
+                    manga_id = parts[1] if parts[0] == "series" else None
+                    if not manga_id:
+                        continue
+                    title = item.get_text(strip=True) or item.get("title", "") or manga_id
+                    img = item.find("img")
+                    cover = img.get("src", "") if img else ""
+                    data.append({"id": manga_id, "title": title, "cover": cover, "description": "", "status": "", "genres": []})
+
+            results = []
+            seen = set()
+            for m in data:
+                mid = m.get("id") or m.get("slug") or m.get("url", "").rstrip("/").split("/")[-1]
+                title = m.get("title") or m.get("name") or mid
+                if not mid or mid in seen:
+                    continue
+                seen.add(mid)
+                cover = m.get("cover") or m.get("cover_url") or m.get("image") or ""
+                desc = (m.get("description") or m.get("synopsis") or "")[:400]
+                status = m.get("status") or ""
+                tags = m.get("genres") or m.get("tags") or []
+                if isinstance(tags, list) and tags and isinstance(tags[0], dict):
+                    tags = [t.get("name", "") for t in tags]
+                results.append(MangaResult(mid, str(title), desc, cover, status, tags[:6]))
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class WeebCentralChaptersWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str, lang: str = "en"):
+        super().__init__()
+        self.manga_id = manga_id
+        self.lang = lang
+
+    def run(self):
+        try:
+            from bs4 import BeautifulSoup
+            session = _wc_session()
+            # manga_id is the series ID portion: /series/{id}/...
+            r = session.get(
+                f"{_WC_BASE}/series/{self.manga_id}/full-chapter-list",
+                timeout=15,
+            )
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            chapters = []
+            for a in soup.select("a[href*='/chapters/']"):
+                href = a.get("href", "")
+                # href like https://weebcentral.com/chapters/XXXXX
+                ch_id = href.rstrip("/").split("/")[-1]
+                # chapter number from text like "Chapter 001" or span
+                text = a.get_text(" ", strip=True)
+                import re
+                num_m = re.search(r'[Cc]hapter\s+(\d+(?:\.\d+)?)', text)
+                num = num_m.group(1) if num_m else text.split()[-1] if text else "?"
+                title_span = a.select_one("span:not(.sr-only)")
+                ch_title = title_span.get_text(strip=True) if title_span else ""
+                chapters.append(MangaChapter(ch_id, num, ch_title, self.lang, 0, ""))
+            # chapters are newest-first from the page; reverse to ascending
+            chapters.reverse()
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class WeebCentralPagesWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_id: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_id = chapter_id
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            from bs4 import BeautifulSoup
+            session = _wc_session()
+            r = session.get(
+                f"{_WC_BASE}/chapters/{self.chapter_id}/images",
+                params={"reading_style": "long_strip"},
+                timeout=15,
+            )
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            urls = []
+            for img in soup.select("img[src]"):
+                src = img.get("src", "")
+                if src and ("weebcentral" in src or "weebcdn" in src or src.startswith("http")):
+                    urls.append(src)
+            if not urls:
+                # try data-src lazy loaded
+                for img in soup.select("img[data-src]"):
+                    src = img.get("data-src", "")
+                    if src:
+                        urls.append(src)
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ── Manganato workers ─────────────────────────────────────────────────────────
+
+_MNG_BASE = "https://www.manganato.gg"
+_MNG_CDN  = "https://chapmanganato.to"
+
+
+def _mng_session():
+    try:
+        import cloudscraper
+        s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+    except ImportError:
+        import requests
+        s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+        "Referer": _MNG_BASE + "/",
+    })
+    return s
+
+
+class ManganatSearchWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import re
+            from bs4 import BeautifulSoup
+            session = _mng_session()
+            slug = re.sub(r'[^a-z0-9]+', '_', self.query.lower()).strip('_')
+            r = session.get(f"{_MNG_BASE}/search/story/{slug}", timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            results = []
+            for item in soup.select(".search-story-item, .list-story-item"):
+                a = item.select_one("h3 a, .item-title a, a.item-img")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                manga_id = href.rstrip("/").split("/")[-1]
+                title = a.get_text(strip=True) or a.get("title", "") or manga_id
+                img = item.select_one("img")
+                cover = img.get("src", "") if img else ""
+                desc_el = item.select_one(".text-nowrap3, .item-summary")
+                desc = desc_el.get_text(strip=True)[:400] if desc_el else ""
+                results.append(MangaResult(manga_id, title, desc, cover, "", []))
+                if len(results) >= self.limit:
+                    break
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ManganatChaptersWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str, lang: str = "en"):
+        super().__init__()
+        self.manga_id = manga_id
+        self.lang = lang
+
+    def run(self):
+        try:
+            import re
+            from bs4 import BeautifulSoup
+            session = _mng_session()
+            r = session.get(f"{_MNG_BASE}/{self.manga_id}", timeout=15)
+            if r.status_code == 404:
+                r = session.get(f"{_MNG_CDN}/{self.manga_id}", timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            chapters = []
+            for li in soup.select("ul.row-content-chapter li, .chapter-list li"):
+                a = li.select_one("a")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                ch_id = href  # full URL used as ID for pages lookup
+                text = a.get_text(strip=True)
+                m = re.search(r'[Cc]hapter\s+(\d+(?:\.\d+)?)', text)
+                num = m.group(1) if m else "?"
+                title_span = li.select_one(".chapter-name-last")
+                ch_title = title_span.get_text(strip=True) if title_span else ""
+                chapters.append(MangaChapter(href, num, ch_title, self.lang, 0, ""))
+            chapters.reverse()
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ManganatPagesWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_url: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_url = chapter_url
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            from bs4 import BeautifulSoup
+            session = _mng_session()
+            r = session.get(self.chapter_url, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            urls = []
+            for img in soup.select(".container-chapter-reader img, .chapter-content img"):
+                src = img.get("src", "")
+                if src:
+                    urls.append(src)
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
