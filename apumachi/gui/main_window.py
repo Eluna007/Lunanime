@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
         self._theme_btn.clicked.connect(self._toggle_theme)
         sb_layout.addWidget(self._theme_btn)
 
-        provider_hint = QLabel("Providers:\nAllManga · KAA\nAnimeUnity · AllManga (manga)")
+        provider_hint = QLabel("Anime: AllManga\nManga: MangaDex")
         provider_hint.setStyleSheet("font-size: 10px; color: #444455; padding: 10px 16px;")
         sb_layout.addWidget(provider_hint)
 

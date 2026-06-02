@@ -2,6 +2,10 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 from anipy_api.provider.base import LanguageTypeEnum
 
+# In-memory image cache shared across all ImageWorker instances
+_IMAGE_CACHE: dict[str, bytes] = {}
+_IMAGE_CACHE_MAX = 200
+
 
 class SearchWorker(QThread):
     results_ready = pyqtSignal(list)
@@ -88,6 +92,9 @@ class ImageWorker(QThread):
         self.url = url
 
     def run(self):
+        if self.url in _IMAGE_CACHE:
+            self.image_ready.emit(_IMAGE_CACHE[self.url])
+            return
         try:
             import requests
             res = requests.get(self.url, timeout=10, headers={
@@ -95,6 +102,10 @@ class ImageWorker(QThread):
                 "Referer": self.url,
             })
             if res.ok:
+                if len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
+                    # evict oldest entry
+                    _IMAGE_CACHE.pop(next(iter(_IMAGE_CACHE)))
+                _IMAGE_CACHE[self.url] = res.content
                 self.image_ready.emit(res.content)
         except Exception:
             pass
