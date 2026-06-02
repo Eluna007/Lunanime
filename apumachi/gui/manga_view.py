@@ -26,6 +26,7 @@ class MangaView(QWidget):
         super().__init__(parent)
         self._search_worker   = None
         self._chapters_worker = None
+        self._meta_worker     = None
         self._current_manga   = None
         self._chapters        = []
         self._source          = "mangadex"
@@ -218,11 +219,26 @@ class MangaView(QWidget):
         self._manga_tags.setText("  ·  ".join(manga.tags))
         self._cover_label.setText("Loading…")
         self._cover_label.setPixmap(QPixmap())
-        if manga.cover_url:
+        if self._source == "weebcentral":
+            mw = WeebCentralMetaWorker(manga.manga_id)
+            mw.meta_ready.connect(self._on_wc_meta)
+            mw.start()
+            self._meta_worker = mw
+        elif manga.cover_url:
             w = ImageWorker(manga.cover_url)
             w.image_ready.connect(self._set_cover)
             w.start()
         self._reload_chapters()
+
+    def _on_wc_meta(self, cover_url: str, description: str):
+        if description and self._current_manga:
+            self._manga_desc.setText(description)
+        if cover_url:
+            w = ImageWorker(cover_url)
+            w.image_ready.connect(self._set_cover)
+            w.start()
+        else:
+            self._cover_label.setText("No cover")
 
     def _set_cover(self, data: bytes):
         pix = QPixmap()

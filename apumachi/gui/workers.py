@@ -687,6 +687,54 @@ class WeebCentralSearchWorker(QThread):
             self.error.emit(str(e))
 
 
+class WeebCentralMetaWorker(QThread):
+    """Fetches cover URL and description for a WeebCentral series."""
+    meta_ready = pyqtSignal(str, str)   # cover_url, description
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str):
+        super().__init__()
+        self.manga_id = manga_id
+
+    def run(self):
+        try:
+            import requests as _requests
+            from bs4 import BeautifulSoup
+            from apumachi.firefox_cookies import _FF_UA
+
+            s = _requests.Session()
+            s.headers.update({
+                "User-Agent": _FF_UA,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                "Referer": _WC_BASE + "/",
+            })
+            r = s.get(f"{_WC_BASE}/series/{self.manga_id}", timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            cover_url = ""
+            og = soup.find("meta", property="og:image")
+            if og:
+                cover_url = og.get("content", "")
+            if not cover_url:
+                img = soup.select_one("section img, article img, .cover img, img.cover")
+                if img:
+                    cover_url = img.get("src", "") or img.get("data-src", "")
+
+            desc = ""
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc:
+                desc = og_desc.get("content", "").strip()
+            if not desc:
+                p = soup.select_one("section p, .description p, p.synopsis")
+                if p:
+                    desc = p.get_text(strip=True)
+
+            self.meta_ready.emit(cover_url, desc)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class WeebCentralChaptersWorker(QThread):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
