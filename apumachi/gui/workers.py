@@ -631,50 +631,56 @@ class WeebCentralSearchWorker(QThread):
 
     def run(self):
         try:
+            import re
+            from bs4 import BeautifulSoup
             session = _wc_session()
+
+            # /search/data returns an HTML fragment (HTMX), not JSON
             r = session.get(
                 f"{_WC_BASE}/search/data",
                 params={"text": self.query, "limit": self.limit, "offset": 0,
                         "sort": "Best Match", "order": "asc", "official": "Any"},
+                headers={"HX-Request": "true", "Accept": "text/html,*/*"},
                 timeout=15,
             )
             r.raise_for_status()
-            # Response is JSON list of series
-            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else []
-            if not data:
-                # Fallback: HTML search page
-                from bs4 import BeautifulSoup
-                r2 = session.get(f"{_WC_BASE}/search", params={"text": self.query}, timeout=15)
-                soup = BeautifulSoup(r2.text, "html.parser")
-                data = []
-                for item in soup.select("a[href*='/series/']"):
-                    href = item.get("href", "")
-                    parts = [p for p in href.split("/") if p]
-                    if len(parts) < 2:
-                        continue
-                    manga_id = parts[1] if parts[0] == "series" else None
-                    if not manga_id:
-                        continue
-                    title = item.get_text(strip=True) or item.get("title", "") or manga_id
-                    img = item.find("img")
-                    cover = img.get("src", "") if img else ""
-                    data.append({"id": manga_id, "title": title, "cover": cover, "description": "", "status": "", "genres": []})
 
+            # Try JSON first (some mirrors return it)
             results = []
-            seen = set()
-            for m in data:
-                mid = m.get("id") or m.get("slug") or m.get("url", "").rstrip("/").split("/")[-1]
-                title = m.get("title") or m.get("name") or mid
-                if not mid or mid in seen:
-                    continue
-                seen.add(mid)
-                cover = m.get("cover") or m.get("cover_url") or m.get("image") or ""
-                desc = (m.get("description") or m.get("synopsis") or "")[:400]
-                status = m.get("status") or ""
-                tags = m.get("genres") or m.get("tags") or []
-                if isinstance(tags, list) and tags and isinstance(tags[0], dict):
-                    tags = [t.get("name", "") for t in tags]
-                results.append(MangaResult(mid, str(title), desc, cover, status, tags[:6]))
+            try:
+                data = r.json()
+                for m in data:
+                    mid = m.get("id") or m.get("slug") or ""
+                    title = m.get("title") or m.get("name") or mid
+                    if not mid:
+                        continue
+                    cover = m.get("cover") or m.get("cover_url") or m.get("image") or ""
+                    desc = (m.get("description") or m.get("synopsis") or "")[:400]
+                    status = m.get("status") or ""
+                    tags = m.get("genres") or m.get("tags") or []
+                    if isinstance(tags, list) and tags and isinstance(tags[0], dict):
+                        tags = [t.get("name", "") for t in tags]
+                    results.append(MangaResult(mid, str(title), desc, cover, status, tags[:6]))
+            except Exception:
+                # Parse the HTML fragment
+                soup = BeautifulSoup(r.text, "html.parser")
+                seen = set()
+                # WeebCentral search fragment: each result is an <a> linking to /series/{id}/...
+                for a in soup.select("a[href*='/series/']"):
+                    href = a.get("href", "")
+                    m = re.search(r'/series/([^/]+)', href)
+                    if not m:
+                        continue
+                    mid = m.group(1)
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    # title: prefer alt text of img, then text content
+                    img = a.find("img")
+                    title = (img.get("alt", "") if img else "") or a.get("title", "") or a.get_text(strip=True) or mid
+                    cover = img.get("src", "") if img else ""
+                    results.append(MangaResult(mid, title, "", cover, "", []))
+
             self.results_ready.emit(results)
         except Exception as e:
             self.error.emit(str(e))
