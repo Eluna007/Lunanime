@@ -248,7 +248,8 @@ class AnimeView(QWidget):
 
         player_name = self.player_combo.currentData() or "mpv"
         try:
-            player = get_player(player_name)
+            from pathlib import Path
+            player = get_player(Path(player_name))
             from anipy_api.anime import Anime
             anime = Anime(
                 self._provider,
