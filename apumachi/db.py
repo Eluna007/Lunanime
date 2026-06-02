@@ -52,6 +52,25 @@ def init_db():
                 path TEXT NOT NULL,
                 downloaded_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS oauth_tokens (
+                service TEXT PRIMARY KEY,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                expires_at TEXT,
+                username TEXT,
+                user_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tracking_ids (
+                provider TEXT NOT NULL,
+                identifier TEXT NOT NULL,
+                anilist_id INTEGER,
+                mal_id INTEGER,
+                PRIMARY KEY(provider, identifier)
+            );
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
         """)
 
 
@@ -164,3 +183,62 @@ def get_downloads():
             "SELECT * FROM downloads ORDER BY downloaded_at DESC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── OAuth tokens ──────────────────────────────────────────────────────────────
+
+def save_oauth_token(service, access_token, refresh_token=None,
+                     expires_at=None, username=None, user_id=None):
+    with _conn() as c:
+        c.execute("""
+            INSERT OR REPLACE INTO oauth_tokens
+            (service, access_token, refresh_token, expires_at, username, user_id)
+            VALUES (?,?,?,?,?,?)
+        """, (service, access_token, refresh_token, expires_at, username, user_id))
+
+
+def get_oauth_token(service) -> dict | None:
+    with _conn() as c:
+        row = c.execute("SELECT * FROM oauth_tokens WHERE service=?", (service,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_oauth_token(service):
+    with _conn() as c:
+        c.execute("DELETE FROM oauth_tokens WHERE service=?", (service,))
+
+
+# ── Tracking IDs ──────────────────────────────────────────────────────────────
+
+def save_tracking_id(provider, identifier, anilist_id=None, mal_id=None):
+    with _conn() as c:
+        c.execute("""
+            INSERT INTO tracking_ids (provider, identifier, anilist_id, mal_id)
+            VALUES (?,?,?,?)
+            ON CONFLICT(provider, identifier) DO UPDATE SET
+                anilist_id = COALESCE(excluded.anilist_id, anilist_id),
+                mal_id     = COALESCE(excluded.mal_id, mal_id)
+        """, (provider, identifier, anilist_id, mal_id))
+
+
+def get_tracking_id(provider, identifier, service: str):
+    col = "anilist_id" if service == "anilist" else "mal_id"
+    with _conn() as c:
+        row = c.execute(
+            f"SELECT {col} FROM tracking_ids WHERE provider=? AND identifier=?",
+            (provider, identifier)
+        ).fetchone()
+    return row[col] if row and row[col] else None
+
+
+# ── App settings key-value ────────────────────────────────────────────────────
+
+def save_setting(key, value):
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)", (key, value))
+
+
+def get_setting(key) -> str | None:
+    with _conn() as c:
+        row = c.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None

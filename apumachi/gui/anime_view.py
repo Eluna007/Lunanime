@@ -10,7 +10,8 @@ from PyQt6.QtGui import QPixmap
 from anipy_api.provider.base import LanguageTypeEnum
 from anipy_api.player.player import get_player, list_players
 
-from .workers import EpisodesWorker, StreamWorker, ImageWorker, AutoPlayWorker, DownloadWorker
+from .workers import (EpisodesWorker, StreamWorker, ImageWorker,
+                       AutoPlayWorker, DownloadWorker, TrackingWorker)
 from .workers import InfoWorker as InfoWorker_local
 from .. import db
 
@@ -372,6 +373,13 @@ class AnimeView(QWidget):
                 self.quality_combo.currentData(),
                 self._cover_image_url,
             )
+
+            # Sync to AniList / MAL (background, silent)
+            self._tracking_worker = TrackingWorker(
+                self._result.name, int(stream.episode),
+                self._provider.NAME, self._result.identifier,
+            )
+            self._tracking_worker.start()
 
             # Auto-play watcher
             if self.autoplay_check.isChecked():

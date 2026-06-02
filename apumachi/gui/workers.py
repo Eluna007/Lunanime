@@ -289,3 +289,51 @@ class DownloadWorker(QThread):
             self.finished.emit(str(path))
         except Exception as e:
             self.error.emit(str(e))
+
+
+class OAuthWorker(QThread):
+    """Runs an OAuth connect flow in a thread (opens browser, waits for callback)."""
+    success = pyqtSignal(str)   # username
+    error   = pyqtSignal(str)
+
+    def __init__(self, service: str, client_id: str, client_secret: str = ""):
+        super().__init__()
+        self.service = service
+        self.client_id = client_id
+        self.client_secret = client_secret
+
+    def run(self):
+        try:
+            from apumachi import tracking
+            if self.service == "anilist":
+                result = tracking.anilist_connect(self.client_id, self.client_secret)
+            else:
+                result = tracking.mal_connect(self.client_id)
+            if result:
+                self.success.emit(result["username"])
+            else:
+                self.error.emit("No authorisation code received (timed out).")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class TrackingWorker(QThread):
+    """Syncs a watched episode to AniList and/or MAL. Silent failures."""
+
+    def __init__(self, title: str, episode: int, provider: str, identifier: str):
+        super().__init__()
+        self.title      = title
+        self.episode    = int(episode)
+        self.provider   = provider
+        self.identifier = identifier
+
+    def run(self):
+        from apumachi import tracking
+        try:
+            tracking.anilist_sync(self.title, self.episode, self.provider, self.identifier)
+        except Exception:
+            pass
+        try:
+            tracking.mal_sync(self.title, self.episode, self.provider, self.identifier)
+        except Exception:
+            pass
