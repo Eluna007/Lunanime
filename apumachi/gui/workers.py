@@ -461,6 +461,129 @@ class MangaPagesWorker(QThread):
             self.error.emit(str(e))
 
 
+# ── Comick workers ────────────────────────────────────────────────────────────
+
+_COMICK_API = "https://api.comick.fun"
+
+
+class ComickSearchWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests
+            r = requests.get(
+                f"{_COMICK_API}/v1.0/search/",
+                params={"q": self.query, "limit": self.limit, "page": 1},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            r.raise_for_status()
+            results = []
+            for m in r.json():
+                md = m.get("md_covers", [])
+                cover = ""
+                if md:
+                    b2_key = md[0].get("b2key") or md[0].get("gpurl", "")
+                    if b2_key:
+                        cover = f"https://meo.comick.pictures/{b2_key}"
+                title = m.get("title") or m.get("slug") or "Unknown"
+                desc = (m.get("desc") or "")[:400]
+                status_val = m.get("status") or 1
+                status = "ongoing" if status_val == 1 else "completed" if status_val == 2 else ""
+                tags = [g.get("name", "") for g in m.get("genres", [])][:6]
+                results.append(MangaResult(
+                    manga_id=m.get("slug", m.get("id", "")),
+                    title=title,
+                    description=desc,
+                    cover_url=cover,
+                    status=status,
+                    tags=tags,
+                ))
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ComickChaptersWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_slug: str, lang: str = "en"):
+        super().__init__()
+        self.manga_slug = manga_slug
+        self.lang = lang
+
+    def run(self):
+        try:
+            import requests
+            chapters = []
+            page = 1
+            while True:
+                r = requests.get(
+                    f"{_COMICK_API}/comic/{self.manga_slug}/chapters",
+                    params={"lang": self.lang, "page": page, "limit": 99, "chap-order": 1},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=15,
+                )
+                r.raise_for_status()
+                data = r.json()
+                batch = data.get("chapters", [])
+                if not batch:
+                    break
+                for ch in batch:
+                    hid = ch.get("hid", "")
+                    num = ch.get("chap") or "?"
+                    title = ch.get("title") or ""
+                    groups = ch.get("group_name", [])
+                    scanlator = groups[0] if groups else ""
+                    chapters.append(MangaChapter(hid, num, title, self.lang, 0, scanlator))
+                if len(batch) < 99:
+                    break
+                page += 1
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ComickPagesWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_hid: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_hid = chapter_hid
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            import requests
+            r = requests.get(
+                f"{_COMICK_API}/chapter/{self.chapter_hid}",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+            images = data.get("chapter", {}).get("images", [])
+            urls = []
+            for img in images:
+                url = img.get("url") or img.get("b2key")
+                if url:
+                    if not url.startswith("http"):
+                        url = f"https://meo.comick.pictures/{url}"
+                    urls.append(url)
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 def _parse_manga_list(data: list) -> list:
     results = []
     for m in data:
