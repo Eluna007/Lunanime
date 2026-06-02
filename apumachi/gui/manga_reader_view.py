@@ -180,14 +180,12 @@ class MangaReaderView(QWidget):
         if self._pages_worker and self._pages_worker.isRunning():
             self._pages_worker.terminate()
         source = getattr(self._manga, "source", "mangadex")
-        if source == "comick":
-            self._pages_worker = ComickPagesWorker(chapter.chapter_id, self._data_saver)
-        elif source == "weebcentral":
+        if source == "weebcentral":
             from .workers import WeebCentralPagesWorker
             self._pages_worker = WeebCentralPagesWorker(chapter.chapter_id, self._data_saver)
-        elif source == "manganato":
-            from .workers import ManganatPagesWorker
-            self._pages_worker = ManganatPagesWorker(chapter.chapter_id, self._data_saver)
+        elif source == "mangafire":
+            from .workers import MangaFirePagesWorker
+            self._pages_worker = MangaFirePagesWorker(chapter.chapter_id, self._data_saver)
         else:
             self._pages_worker = MangaPagesWorker(chapter.chapter_id, self._data_saver)
         self._pages_worker.results_ready.connect(self._on_pages)
