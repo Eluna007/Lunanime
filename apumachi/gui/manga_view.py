@@ -14,8 +14,7 @@ from PyQt6.QtGui import QPixmap
 from .anime_card import AnimeCard
 from .workers import (MangaSearchWorker, MangaChaptersWorker,
                       ImageWorker, MangaResult, MangaChapter,
-                      WeebCentralSearchWorker, WeebCentralMetaWorker,
-                      WeebCentralChaptersWorker, WeebCentralPagesWorker,
+                      WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralPagesWorker,
                       MangaFireSearchWorker, MangaFireChaptersWorker, MangaFirePagesWorker)
 from .. import db
 
