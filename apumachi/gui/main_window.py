@@ -10,6 +10,8 @@ from .search_view import SearchView
 from .anime_view import AnimeView
 from .home_view import HomeView
 from .seasons_view import SeasonsView
+from .manga_view import MangaView
+from .manga_reader_view import MangaReaderView
 from .downloads_view import DownloadsView
 from .settings_view import SettingsView
 
@@ -18,13 +20,15 @@ NAV_ITEMS = [
     ("home",      "🏠  Home"),
     ("search",    "🔍  Search"),
     ("seasons",   "📅  Seasons"),
+    ("manga",     "📖  Manga"),
     ("downloads", "⬇  Downloads"),
     ("settings",  "⚙  Settings"),
 ]
 
-# Stack indices
+# Stack indices  (must match addWidget order in _build_ui)
 _IDX = {k: i for i, (k, _) in enumerate(NAV_ITEMS)}
-_IDX["anime"] = len(NAV_ITEMS)
+_IDX["anime"]        = len(NAV_ITEMS)      # 6
+_IDX["manga_reader"] = len(NAV_ITEMS) + 1  # 7
 
 
 class MainWindow(QMainWindow):
@@ -98,16 +102,24 @@ class MainWindow(QMainWindow):
         self.seasons_view.anime_selected.connect(self._open_anime)
         self.stack.addWidget(self.seasons_view)    # 2
 
+        self.manga_view = MangaView()
+        self.manga_view.read_chapter.connect(self._open_reader)
+        self.stack.addWidget(self.manga_view)      # 3
+
         self.downloads_view = DownloadsView()
-        self.stack.addWidget(self.downloads_view)  # 3
+        self.stack.addWidget(self.downloads_view)  # 4
 
         self.settings_view = SettingsView()
-        self.stack.addWidget(self.settings_view)   # 4
+        self.stack.addWidget(self.settings_view)   # 5
 
         self.anime_view = AnimeView()
         self.anime_view.back_requested.connect(self._on_anime_back)
         self.anime_view.download_started.connect(self._on_download_started)
-        self.stack.addWidget(self.anime_view)      # 5
+        self.stack.addWidget(self.anime_view)      # 6
+
+        self.manga_reader_view = MangaReaderView()
+        self.manga_reader_view.back_requested.connect(lambda: self._nav_to("manga"))
+        self.stack.addWidget(self.manga_reader_view)  # 7
 
         self._prev_nav_key = "home"
         self._nav_to("home")
@@ -157,6 +169,10 @@ class MainWindow(QMainWindow):
 
     def _on_download_started(self, name, episode, worker):
         self.downloads_view.add_active_download(name, episode, worker)
+
+    def _open_reader(self, manga, chapters, chapter):
+        self.manga_reader_view.open(manga, chapters, chapter)
+        self._nav_to("manga_reader")
 
     def _toggle_theme(self):
         self._dark_mode = not self._dark_mode

@@ -71,6 +71,21 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS watched_episodes (
+                provider TEXT NOT NULL,
+                identifier TEXT NOT NULL,
+                episode REAL NOT NULL,
+                marked_at TEXT NOT NULL,
+                PRIMARY KEY(provider, identifier, episode)
+            );
+            CREATE TABLE IF NOT EXISTS manga_history (
+                manga_id TEXT NOT NULL,
+                chapter_id TEXT NOT NULL,
+                chapter_num TEXT NOT NULL,
+                title TEXT NOT NULL,
+                marked_at TEXT NOT NULL,
+                PRIMARY KEY(manga_id, chapter_id)
+            );
         """)
 
 
@@ -242,3 +257,71 @@ def get_setting(key) -> str | None:
     with _conn() as c:
         row = c.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+# ── Watched episodes ──────────────────────────────────────────────────────────
+
+def mark_watched(provider, identifier, episode):
+    with _conn() as c:
+        c.execute("""
+            INSERT OR REPLACE INTO watched_episodes (provider, identifier, episode, marked_at)
+            VALUES (?,?,?,?)
+        """, (provider, identifier, episode, datetime.now().isoformat()))
+
+
+def mark_unwatched(provider, identifier, episode):
+    with _conn() as c:
+        c.execute("DELETE FROM watched_episodes WHERE provider=? AND identifier=? AND episode=?",
+                  (provider, identifier, episode))
+
+
+def get_watched_episodes(provider, identifier) -> set:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT episode FROM watched_episodes WHERE provider=? AND identifier=?",
+            (provider, identifier)
+        ).fetchall()
+    return {r["episode"] for r in rows}
+
+
+def is_episode_watched(provider, identifier, episode) -> bool:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM watched_episodes WHERE provider=? AND identifier=? AND episode=?",
+            (provider, identifier, episode)
+        ).fetchone()
+    return row is not None
+
+
+# ── Manga read history ────────────────────────────────────────────────────────
+
+def mark_chapter_read(manga_id, chapter_id, chapter_num, title):
+    with _conn() as c:
+        c.execute("""
+            INSERT OR REPLACE INTO manga_history
+            (manga_id, chapter_id, chapter_num, title, marked_at)
+            VALUES (?,?,?,?,?)
+        """, (manga_id, chapter_id, chapter_num, title, datetime.now().isoformat()))
+
+
+def get_read_chapters(manga_id) -> set:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT chapter_id FROM manga_history WHERE manga_id=?", (manga_id,)
+        ).fetchall()
+    return {r["chapter_id"] for r in rows}
+
+
+def unmark_chapter_read(manga_id, chapter_id):
+    with _conn() as c:
+        c.execute("DELETE FROM manga_history WHERE manga_id=? AND chapter_id=?",
+                  (manga_id, chapter_id))
+
+
+def is_chapter_read(manga_id, chapter_id) -> bool:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM manga_history WHERE manga_id=? AND chapter_id=?",
+            (manga_id, chapter_id)
+        ).fetchone()
+    return row is not None

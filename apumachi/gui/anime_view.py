@@ -169,6 +169,8 @@ class AnimeView(QWidget):
         # Episode list
         self.ep_list = QListWidget()
         self.ep_list.itemDoubleClicked.connect(self._play_episode)
+        self.ep_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ep_list.customContextMenuRequested.connect(self._ep_context_menu)
         rl.addWidget(self.ep_list, 1)
 
         # Button row
@@ -286,15 +288,20 @@ class AnimeView(QWidget):
         last_ep = db.get_last_episode(
             self._provider.NAME, self._result.identifier, lang.value
         )
+        watched = db.get_watched_episodes(self._provider.NAME, self._result.identifier)
 
         self.ep_status.setText(f"{len(episodes)} episode{'s' if len(episodes) != 1 else ''}")
 
         for ep in episodes:
-            label = f"Episode {int(ep) if ep == int(ep) else ep}"
+            ep_label = f"Episode {int(ep) if ep == int(ep) else ep}"
+            is_watched = ep in watched
+            label = ("✓ " if is_watched else "  ") + ep_label
             if last_ep is not None and ep == last_ep:
-                label += "  ✓ (last watched)"
+                label += "  (last played)"
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, ep)
+            if is_watched:
+                item.setForeground(item.foreground().__class__("#86efac"))
             self.ep_list.addItem(item)
 
         # Show resume hint and select last episode
@@ -373,6 +380,8 @@ class AnimeView(QWidget):
                 self.quality_combo.currentData(),
                 self._cover_image_url,
             )
+            db.mark_watched(self._provider.NAME, self._result.identifier, stream.episode)
+            self._refresh_episode_watched_state(stream.episode)
 
             # Sync to AniList / MAL (background, silent)
             self._tracking_worker = TrackingWorker(
@@ -401,6 +410,52 @@ class AnimeView(QWidget):
         if next_row < self.ep_list.count():
             self.ep_list.setCurrentRow(next_row)
             self._play_episode(self.ep_list.currentItem())
+
+    def _refresh_episode_watched_state(self, episode):
+        """Update a single episode row's label without reloading the full list."""
+        for i in range(self.ep_list.count()):
+            item = self.ep_list.item(i)
+            ep = item.data(Qt.ItemDataRole.UserRole)
+            if ep == episode:
+                ep_label = f"Episode {int(ep) if ep == int(ep) else ep}"
+                item.setText("✓ " + ep_label + "  (last played)")
+                item.setForeground(item.foreground().__class__("#86efac"))
+                break
+
+    def _ep_context_menu(self, pos):
+        item = self.ep_list.itemAt(pos)
+        if not item:
+            return
+        ep = item.data(Qt.ItemDataRole.UserRole)
+        watched = db.is_episode_watched(self._provider.NAME, self._result.identifier, ep)
+
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        play_action   = menu.addAction("▶  Play")
+        menu.addSeparator()
+        toggle_action = menu.addAction("✗  Mark Unwatched" if watched else "✓  Mark Watched")
+        mark_all_to   = menu.addAction("✓  Mark all up to here as Watched")
+        menu.addSeparator()
+        dl_action     = menu.addAction("⬇  Download")
+
+        action = menu.exec(self.ep_list.mapToGlobal(pos))
+        if action == play_action:
+            self._play_episode(item)
+        elif action == toggle_action:
+            if watched:
+                db.mark_unwatched(self._provider.NAME, self._result.identifier, ep)
+            else:
+                db.mark_watched(self._provider.NAME, self._result.identifier, ep)
+            self._reload_episodes()
+        elif action == mark_all_to:
+            row = self.ep_list.row(item)
+            for i in range(row + 1):
+                ep_i = self.ep_list.item(i).data(Qt.ItemDataRole.UserRole)
+                db.mark_watched(self._provider.NAME, self._result.identifier, ep_i)
+            self._reload_episodes()
+        elif action == dl_action:
+            self.ep_list.setCurrentItem(item)
+            self._download_selected()
 
     # ── Download ───────────────────────────────────────────────────────────────
 

@@ -337,3 +337,145 @@ class TrackingWorker(QThread):
             tracking.mal_sync(self.title, self.episode, self.provider, self.identifier)
         except Exception:
             pass
+
+
+# ── MangaDex workers ──────────────────────────────────────────────────────────
+
+class MangaResult:
+    def __init__(self, manga_id, title, description, cover_url, status, tags):
+        self.manga_id    = manga_id
+        self.title       = title
+        self.name        = title   # AnimeCard compat
+        self.description = description
+        self.cover_url   = cover_url
+        self.image_url   = cover_url
+        self.status      = status
+        self.tags        = tags
+
+
+class MangaChapter:
+    def __init__(self, chapter_id, chapter_num, title, lang, pages, scanlator=""):
+        self.chapter_id  = chapter_id
+        self.chapter_num = chapter_num
+        self.title       = title
+        self.lang        = lang
+        self.pages       = pages    # int count (filled after page fetch)
+        self.scanlator   = scanlator
+
+
+_MDX = "https://api.mangadex.org"
+_CDN = "https://uploads.mangadex.org"
+
+
+class MangaSearchWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests
+            params = {
+                "title": self.query, "limit": self.limit,
+                "contentRating[]": ["safe", "suggestive"],
+                "includes[]": ["cover_art"],
+                "order[relevance]": "desc",
+            }
+            r = requests.get(f"{_MDX}/manga", params=params, timeout=15)
+            r.raise_for_status()
+            self.results_ready.emit(_parse_manga_list(r.json()["data"]))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaChaptersWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str, lang: str = "en"):
+        super().__init__()
+        self.manga_id = manga_id
+        self.lang = lang
+
+    def run(self):
+        try:
+            import requests
+            chapters, offset, limit = [], 0, 100
+            while True:
+                r = requests.get(f"{_MDX}/manga/{self.manga_id}/feed", params={
+                    "translatedLanguage[]": [self.lang],
+                    "order[chapter]": "asc",
+                    "limit": limit, "offset": offset,
+                    "includes[]": ["scanlation_group"],
+                    "contentRating[]": ["safe", "suggestive", "erotica"],
+                }, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                batch = data["data"]
+                for ch in batch:
+                    attrs = ch["attributes"]
+                    num   = attrs.get("chapter") or "?"
+                    title = attrs.get("title") or ""
+                    lang  = attrs.get("translatedLanguage", "en")
+                    pages = attrs.get("pages", 0)
+                    group = ""
+                    for rel in ch.get("relationships", []):
+                        if rel["type"] == "scanlation_group":
+                            group = rel.get("attributes", {}).get("name", "") or ""
+                    chapters.append(MangaChapter(ch["id"], num, title, lang, pages, group))
+                offset += len(batch)
+                if offset >= data["total"] or len(batch) < limit:
+                    break
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaPagesWorker(QThread):
+    results_ready = pyqtSignal(list)   # list of page URLs
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_id: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_id = chapter_id
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            import requests
+            r = requests.get(f"{_MDX}/at-home/server/{self.chapter_id}", timeout=15)
+            r.raise_for_status()
+            d = r.json()
+            base  = d["baseUrl"]
+            ch    = d["chapter"]
+            mode  = "data-saver" if self.data_saver else "data"
+            files = ch["dataSaver"] if self.data_saver else ch["data"]
+            hash_ = ch["hash"]
+            urls  = [f"{base}/{mode}/{hash_}/{f}" for f in files]
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+def _parse_manga_list(data: list) -> list:
+    results = []
+    for m in data:
+        attrs = m["attributes"]
+        title = (attrs.get("title", {}).get("en")
+                 or next(iter(attrs.get("title", {}).values()), "Unknown"))
+        desc  = (attrs.get("description", {}).get("en") or "")[:400]
+        status = attrs.get("status", "")
+        tags  = [t["attributes"]["name"].get("en", "")
+                 for t in attrs.get("tags", [])][:6]
+        cover_url = ""
+        for rel in m.get("relationships", []):
+            if rel["type"] == "cover_art" and rel.get("attributes"):
+                fn = rel["attributes"].get("fileName", "")
+                cover_url = f"{_CDN}/covers/{m['id']}/{fn}.256.jpg"
+                break
+        results.append(MangaResult(m["id"], title, desc, cover_url, status, tags))
+    return results
