@@ -34,7 +34,7 @@ _IDX["manga_reader"] = len(NAV_ITEMS) + 1  # 7
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ApuMachi")
+        self.setWindowTitle("Lunanime")
         self.resize(1100, 720)
         self.setMinimumSize(800, 560)
         self._dark_mode = True
@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
         sb_layout.setContentsMargins(0, 0, 0, 0)
         sb_layout.setSpacing(0)
 
-        logo = QLabel("ApuMachi")
+        logo = QLabel("Lunanime")
         logo.setStyleSheet("font-size: 17px; font-weight: bold; color: #c084fc; padding: 20px 16px 12px;")
         sb_layout.addWidget(logo)
 

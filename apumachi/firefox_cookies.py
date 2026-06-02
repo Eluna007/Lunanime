@@ -1,7 +1,10 @@
 """
-Read cookies from the user's Firefox profile and build a requests.Session.
-Works for any Cloudflare/DDoS-Guard protected site — as long as the user
-has visited the site in Firefox recently, the cf_clearance cookie is reused.
+Build an HTTP session that:
+1. Impersonates Firefox's TLS fingerprint via curl-cffi
+2. Injects cookies from the user's real Firefox profile
+
+This bypasses Cloudflare / DDoS-Guard on sites the user has already visited
+in their browser. If curl-cffi is unavailable, falls back to plain requests.
 """
 import os
 import shutil
@@ -10,20 +13,16 @@ import tempfile
 from configparser import ConfigParser
 from pathlib import Path
 
-import requests
-
 
 def _find_firefox_profile() -> Path | None:
     ff_dir = Path.home() / ".mozilla" / "firefox"
     if not ff_dir.exists():
         return None
 
-    # Parse profiles.ini to find the default profile
     ini = ff_dir / "profiles.ini"
     if ini.exists():
         cfg = ConfigParser()
         cfg.read(ini)
-        # Prefer the profile marked as default
         for section in cfg.sections():
             if cfg.get(section, "Default", fallback="0") == "1":
                 rel = cfg.get(section, "IsRelative", fallback="1")
@@ -33,7 +32,6 @@ def _find_firefox_profile() -> Path | None:
                     if (p / "cookies.sqlite").exists():
                         return p
 
-    # Fallback: any dir that has cookies.sqlite
     for p in ff_dir.iterdir():
         if p.is_dir() and (p / "cookies.sqlite").exists():
             return p
@@ -46,7 +44,6 @@ def _read_cookies(profile: Path, domain: str) -> dict[str, str]:
     if not db.exists():
         return {}
 
-    # Copy so we don't conflict with Firefox's lock
     tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
     tmp.close()
     try:
@@ -65,48 +62,42 @@ def _read_cookies(profile: Path, domain: str) -> dict[str, str]:
     return cookies
 
 
-def _firefox_useragent(profile: Path) -> str:
-    """Read the UA from Firefox's prefs, fall back to a sensible Linux default."""
-    prefs = profile / "prefs.js"
-    if prefs.exists():
-        for line in prefs.read_text(errors="ignore").splitlines():
-            if "general.useragent.override" in line:
-                # user_pref("general.useragent.override", "Mozilla/5.0 ...");
-                start = line.find('"', line.find(",")) + 1
-                end = line.rfind('"')
-                if start > 0 and end > start:
-                    return line[start:end]
-    return (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
-    )
+_FF_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
+
+_BASE_HEADERS = {
+    "User-Agent": _FF_UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
 
 
-def make_session(domain: str, extra_headers: dict | None = None) -> requests.Session:
+def make_session(domain: str, extra_headers: dict | None = None):
     """
-    Return a requests.Session loaded with Firefox cookies for *domain*.
-    Falls back to a plain session with a Firefox UA if no profile is found.
+    Return a session with Firefox TLS fingerprint + real Firefox cookies.
+    Uses curl-cffi if available (recommended), otherwise plain requests.
     """
-    session = requests.Session()
-
     profile = _find_firefox_profile()
-    ua = _firefox_useragent(profile) if profile else (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
-    )
+    cookies = _read_cookies(profile, domain) if profile else {}
 
-    session.headers.update({
-        "User-Agent": ua,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-    })
+    headers = {**_BASE_HEADERS, **(extra_headers or {})}
 
-    if extra_headers:
-        session.headers.update(extra_headers)
-
-    if profile:
-        cookies = _read_cookies(profile, domain)
+    try:
+        from curl_cffi.requests import Session
+        session = Session(impersonate="firefox")
+        session.headers.update(headers)
         for name, value in cookies.items():
             session.cookies.set(name, value, domain=f".{domain}")
-
-    return session
+        return session
+    except ImportError:
+        import requests
+        session = requests.Session()
+        session.headers.update(headers)
+        for name, value in cookies.items():
+            session.cookies.set(name, value, domain=f".{domain}")
+        return session

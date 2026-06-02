@@ -640,51 +640,37 @@ class WeebCentralSearchWorker(QThread):
             from bs4 import BeautifulSoup
             session = _wc_session()
 
-            # /search/data returns an HTML fragment (HTMX), not JSON
+            # Use the full search page — more reliable than the HTMX fragment endpoint
             r = session.get(
-                f"{_WC_BASE}/search/data",
-                params={"text": self.query, "limit": self.limit, "offset": 0,
-                        "sort": "Best Match", "order": "asc", "official": "Any"},
-                headers={"HX-Request": "true", "Accept": "text/html,*/*"},
+                f"{_WC_BASE}/search",
+                params={"text": self.query},
                 timeout=15,
             )
             r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
 
-            # Try JSON first (some mirrors return it)
             results = []
-            try:
-                data = r.json()
-                for m in data:
-                    mid = m.get("id") or m.get("slug") or ""
-                    title = m.get("title") or m.get("name") or mid
-                    if not mid:
-                        continue
-                    cover = m.get("cover") or m.get("cover_url") or m.get("image") or ""
-                    desc = (m.get("description") or m.get("synopsis") or "")[:400]
-                    status = m.get("status") or ""
-                    tags = m.get("genres") or m.get("tags") or []
-                    if isinstance(tags, list) and tags and isinstance(tags[0], dict):
-                        tags = [t.get("name", "") for t in tags]
-                    results.append(MangaResult(mid, str(title), desc, cover, status, tags[:6]))
-            except Exception:
-                # Parse the HTML fragment
-                soup = BeautifulSoup(r.text, "html.parser")
-                seen = set()
-                # WeebCentral search fragment: each result is an <a> linking to /series/{id}/...
-                for a in soup.select("a[href*='/series/']"):
-                    href = a.get("href", "")
-                    m = re.search(r'/series/([^/]+)', href)
-                    if not m:
-                        continue
-                    mid = m.group(1)
-                    if mid in seen:
-                        continue
-                    seen.add(mid)
-                    # title: prefer alt text of img, then text content
-                    img = a.find("img")
-                    title = (img.get("alt", "") if img else "") or a.get("title", "") or a.get_text(strip=True) or mid
-                    cover = img.get("src", "") if img else ""
-                    results.append(MangaResult(mid, title, "", cover, "", []))
+            seen = set()
+
+            # Each result card is an <a> wrapping image + title inside a list/grid
+            for a in soup.select("a[href*='/series/']"):
+                href = a.get("href", "")
+                m = re.search(r'/series/([A-Z0-9]+)', href)
+                if not m:
+                    continue
+                mid = m.group(1)
+                if mid in seen:
+                    continue
+                seen.add(mid)
+                img = a.find("img")
+                cover = (img.get("src") or img.get("data-src", "")) if img else ""
+                title = (img.get("alt", "") if img else "") or a.get("title", "") or a.get_text(strip=True) or mid
+                # skip nav/genre links that happen to have /series/ in href
+                if len(title) < 2 or title.lower() in ("series", "all"):
+                    continue
+                results.append(MangaResult(mid, title.strip(), "", cover, "", []))
+                if len(results) >= self.limit:
+                    break
 
             self.results_ready.emit(results)
         except Exception as e:
