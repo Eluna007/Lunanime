@@ -121,6 +121,74 @@ class TrendingWorker(QThread):
             self.error.emit(str(e))
 
 
+class AniListResult:
+    """Lightweight result object from AniList, compatible with AnimeCard."""
+    def __init__(self, anilist_id: int, name: str, image_url: str):
+        self.anilist_id = anilist_id
+        self.name = name
+        self.image_url = image_url
+
+
+class AniListWorker(QThread):
+    """Fetches trending or seasonal anime from AniList's public GraphQL API."""
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    _GQL_URL = "https://graphql.anilist.co"
+
+    _QUERY = """
+    query ($page: Int, $perPage: Int, $sort: [MediaSort], $season: MediaSeason, $year: Int) {
+      Page(page: $page, perPage: $perPage) {
+        media(type: ANIME, sort: $sort, season: $season, seasonYear: $year, isAdult: false) {
+          id
+          title { romaji english }
+          coverImage { large }
+        }
+      }
+    }
+    """
+
+    _SEASON_MAP = {
+        "WINTER": "WINTER",
+        "SPRING": "SPRING",
+        "SUMMER": "SUMMER",
+        "FALL":   "FALL",
+    }
+
+    def __init__(self, mode: str = "trending", season=None, year=None, limit: int = 24):
+        super().__init__()
+        self.mode = mode      # "trending" or "seasonal"
+        self.season = season  # anipy Season enum or None
+        self.year = year
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests
+            sort = "TRENDING_DESC" if self.mode == "trending" else "POPULARITY_DESC"
+            variables = {"page": 1, "perPage": self.limit, "sort": [sort]}
+            if self.mode == "seasonal" and self.season is not None:
+                variables["season"] = self._SEASON_MAP.get(self.season.name.upper(), "SUMMER")
+                variables["year"] = self.year or __import__("datetime").date.today().year
+
+            resp = requests.post(
+                self._GQL_URL,
+                json={"query": self._QUERY, "variables": variables},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            media_list = resp.json()["data"]["Page"]["media"]
+            results = []
+            for m in media_list:
+                title = m["title"].get("english") or m["title"].get("romaji") or "Unknown"
+                image = m["coverImage"].get("large") or ""
+                results.append(AniListResult(m["id"], title, image))
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class AutoPlayWorker(QThread):
     finished = pyqtSignal()
 

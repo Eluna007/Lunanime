@@ -1,14 +1,14 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QScrollArea, QPushButton, QGridLayout, QFrame,
+    QScrollArea, QPushButton, QGridLayout, QFrame, QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 import datetime
 
 from .anime_card import AnimeCard
-from .workers import TrendingWorker, InfoWorker, ImageWorker
+from .workers import InfoWorker, ImageWorker, AniListWorker, SearchWorker
 from ..db import get_history, get_favorites
-from ..providers import get_provider
+from ..providers import get_provider, list_provider_names
 
 
 def _current_season():
@@ -22,7 +22,7 @@ def _current_season():
 
 class _HScrollSection(QWidget):
     """A labeled horizontal scroll row of anime cards."""
-    card_clicked = pyqtSignal(object, object)   # (provider_name, result-like dict)
+    card_clicked = pyqtSignal(object)   # emits result object
 
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
@@ -49,14 +49,14 @@ class _HScrollSection(QWidget):
         layout.addWidget(scroll)
 
     def clear(self):
-        while self._row.count() > 1:   # keep the trailing stretch
+        while self._row.count() > 1:
             item = self._row.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-    def add_card(self, provider_name, result):
+    def add_card(self, result):
         card = AnimeCard(result)
-        card.clicked.connect(lambda r, pn=provider_name: self.card_clicked.emit(pn, r))
+        card.clicked.connect(self.card_clicked)
         self._row.insertWidget(self._row.count() - 1, card)
         return card
 
@@ -86,6 +86,16 @@ class HomeView(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(24)
 
+        # Provider selector for discover sections
+        prov_row = QHBoxLayout()
+        prov_row.addWidget(QLabel("Play via:"))
+        self._provider_combo = QComboBox()
+        for name in list_provider_names():
+            self._provider_combo.addItem(name.capitalize(), name)
+        prov_row.addWidget(self._provider_combo)
+        prov_row.addStretch()
+        layout.addLayout(prov_row)
+
         # Continue Watching
         self._continue_section = _HScrollSection("▶  Continue Watching")
         self._continue_section.card_clicked.connect(self._on_history_card)
@@ -106,11 +116,11 @@ class HomeView(QWidget):
         sep2.setStyleSheet("color: #2a2a3a;")
         layout.addWidget(sep2)
 
-        # Seasonal
+        # Seasonal (AniList)
         season_name = _current_season().name.capitalize()
         year = datetime.date.today().year
-        self._seasonal_section = _HScrollSection(f"🌸  {season_name} {year}")
-        self._seasonal_section.card_clicked.connect(self._on_trending_card)
+        self._seasonal_section = _HScrollSection(f"🌸  {season_name} {year}  (AniList)")
+        self._seasonal_section.card_clicked.connect(self._on_discover_card)
         layout.addWidget(self._seasonal_section)
 
         sep3 = QFrame()
@@ -118,9 +128,9 @@ class HomeView(QWidget):
         sep3.setStyleSheet("color: #2a2a3a;")
         layout.addWidget(sep3)
 
-        # Trending
-        self._trending_section = _HScrollSection("🔥  Trending")
-        self._trending_section.card_clicked.connect(self._on_trending_card)
+        # Trending (AniList)
+        self._trending_section = _HScrollSection("🔥  Trending  (AniList)")
+        self._trending_section.card_clicked.connect(self._on_discover_card)
         layout.addWidget(self._trending_section)
 
         layout.addStretch()
@@ -149,8 +159,8 @@ class HomeView(QWidget):
                 name=entry["name"],
                 languages={LanguageTypeEnum.SUB},
             )
-            card = self._continue_section.add_card(entry["provider"], result)
-            card._history_entry = entry
+            result._provider_name = entry["provider"]
+            card = self._continue_section.add_card(result)
             if entry.get("image_url"):
                 card.load_image(entry["image_url"])
 
@@ -170,77 +180,81 @@ class HomeView(QWidget):
                 name=fav["name"],
                 languages={LanguageTypeEnum.SUB},
             )
-            card = self._fav_section.add_card(fav["provider"], result)
-            card._history_entry = fav
+            result._provider_name = fav["provider"]
+            card = self._fav_section.add_card(result)
             if fav.get("image_url"):
                 card.load_image(fav["image_url"])
 
-    # ── Seasonal ───────────────────────────────────────────────────────────────
+    # ── Seasonal (AniList) ─────────────────────────────────────────────────────
 
     def _load_seasonal(self):
-        self._seasonal_section.set_placeholder("Loading...")
-        try:
-            provider = get_provider("allmanga")
-        except Exception:
-            self._seasonal_section.set_placeholder("Provider unavailable.")
-            return
-
-        from anipy_api.provider.filter import Filters
+        self._seasonal_section.set_placeholder("Loading from AniList...")
         season = _current_season()
         year = datetime.date.today().year
-        w = TrendingWorker(provider, season=season, year=year, limit=20)
-        w.results_ready.connect(
-            lambda r: self._fill_section(self._seasonal_section, provider, r)
-        )
-        w.error.connect(lambda e: self._seasonal_section.set_placeholder(f"Error: {e}"))
+        w = AniListWorker(mode="seasonal", season=season, year=year, limit=20)
+        w.results_ready.connect(lambda r: self._fill_anilist_section(self._seasonal_section, r))
+        w.error.connect(lambda e: self._seasonal_section.set_placeholder(f"AniList error: {e}"))
         w.start()
         self._workers.append(w)
 
-    # ── Trending ───────────────────────────────────────────────────────────────
+    # ── Trending (AniList) ─────────────────────────────────────────────────────
 
     def _load_trending(self):
-        self._trending_section.set_placeholder("Loading...")
-        try:
-            provider = get_provider("allmanga")
-        except Exception:
-            self._trending_section.set_placeholder("Provider unavailable.")
-            return
-
-        w = TrendingWorker(provider, limit=24)
-        w.results_ready.connect(
-            lambda r: self._fill_section(self._trending_section, provider, r)
-        )
-        w.error.connect(lambda e: self._trending_section.set_placeholder(f"Error: {e}"))
+        self._trending_section.set_placeholder("Loading from AniList...")
+        w = AniListWorker(mode="trending", limit=24)
+        w.results_ready.connect(lambda r: self._fill_anilist_section(self._trending_section, r))
+        w.error.connect(lambda e: self._trending_section.set_placeholder(f"AniList error: {e}"))
         w.start()
         self._workers.append(w)
 
-    def _fill_section(self, section, provider, results):
+    def _fill_anilist_section(self, section, results):
         section.clear()
         if not results:
             section.set_placeholder("Nothing found.")
             return
         for result in results:
-            card = section.add_card(provider.NAME, result)
-            card._provider = provider
-            card._result = result
-            # Lazy-load cover via get_info
-            w = InfoWorker(provider, result.identifier)
-            w.info_ready.connect(lambda info, c=card: c.load_image(info.image) if info.image else None)
-            w.start()
-            self._workers.append(w)
+            card = section.add_card(result)
+            if result.image_url:
+                card.load_image(result.image_url)
 
     # ── Click handlers ─────────────────────────────────────────────────────────
 
-    def _on_history_card(self, provider_name, result):
+    def _on_history_card(self, result):
+        """History/favorites cards already have a provider identifier."""
         try:
+            provider_name = getattr(result, "_provider_name", None) or "allmanga"
             provider = get_provider(provider_name)
             self.anime_selected.emit(provider, result)
         except Exception:
             pass
 
-    def _on_trending_card(self, provider_name, result):
+    def _on_discover_card(self, anilist_result):
+        """AniList card clicked — search by title on the chosen provider."""
+        provider_name = self._provider_combo.currentData() or "allmanga"
         try:
             provider = get_provider(provider_name)
-            self.anime_selected.emit(provider, result)
         except Exception:
-            pass
+            return
+
+        title = anilist_result.name
+        self._seasonal_section.set_placeholder(f"Searching '{title}'...")
+        self._trending_section.set_placeholder(f"Searching '{title}'...")
+
+        w = SearchWorker(provider, title)
+        w.results_ready.connect(lambda results, p=provider, t=title: self._on_search_done(p, results, t))
+        w.error.connect(lambda e: self._on_search_error(e))
+        w.start()
+        self._workers.append(w)
+
+    def _on_search_done(self, provider, results, title):
+        # Reload sections (search placeholder was temporary)
+        self._load_seasonal()
+        self._load_trending()
+        if not results:
+            return
+        # Open the best match (first result)
+        self.anime_selected.emit(provider, results[0])
+
+    def _on_search_error(self, err):
+        self._load_seasonal()
+        self._load_trending()
