@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QPixmap, QKeyEvent
 
-from .workers import MangaPagesWorker, ImageWorker, ComickPagesWorker
+from .workers import MangaPagesWorker, ImageWorker
 from .. import db
 
 
@@ -182,6 +182,12 @@ class MangaReaderView(QWidget):
         source = getattr(self._manga, "source", "mangadex")
         if source == "comick":
             self._pages_worker = ComickPagesWorker(chapter.chapter_id, self._data_saver)
+        elif source == "weebcentral":
+            from .workers import WeebCentralPagesWorker
+            self._pages_worker = WeebCentralPagesWorker(chapter.chapter_id, self._data_saver)
+        elif source == "manganato":
+            from .workers import ManganatPagesWorker
+            self._pages_worker = ManganatPagesWorker(chapter.chapter_id, self._data_saver)
         else:
             self._pages_worker = MangaPagesWorker(chapter.chapter_id, self._data_saver)
         self._pages_worker.results_ready.connect(self._on_pages)
