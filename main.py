@@ -5,6 +5,9 @@ from apumachi.gui.main_window import MainWindow
 
 
 def main():
+    from apumachi.db import init_db
+    init_db()
+
     app = QApplication(sys.argv)
     app.setApplicationName("ApuMachi")
     app.setOrganizationName("ApuMachi")

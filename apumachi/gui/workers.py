@@ -1,3 +1,4 @@
+from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 from anipy_api.provider.base import LanguageTypeEnum
 
@@ -6,14 +7,17 @@ class SearchWorker(QThread):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, provider, query: str):
+    def __init__(self, provider, query: str, filters=None):
         super().__init__()
         self.provider = provider
         self.query = query
+        self.filters = filters
 
     def run(self):
         try:
-            results = self.provider.get_search(self.query)
+            from anipy_api.provider.filter import Filters
+            f = self.filters or Filters()
+            results = self.provider.get_search(self.query, f)
             self.results_ready.emit(results)
         except Exception as e:
             self.error.emit(str(e))
@@ -94,3 +98,68 @@ class ImageWorker(QThread):
                 self.image_ready.emit(res.content)
         except Exception:
             pass
+
+
+class TrendingWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, provider, season=None, year=None, limit=24):
+        super().__init__()
+        self.provider = provider
+        self.season = season
+        self.year = year
+        self.limit = limit
+
+    def run(self):
+        try:
+            from anipy_api.provider.filter import Filters
+            f = Filters(season=self.season, year=self.year)
+            results = self.provider.get_search("", f)
+            self.results_ready.emit(results[:self.limit])
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class AutoPlayWorker(QThread):
+    finished = pyqtSignal()
+
+    def __init__(self, player):
+        super().__init__()
+        self.player = player
+
+    def run(self):
+        try:
+            self.player.wait()
+        except Exception:
+            pass
+        self.finished.emit()
+
+
+class DownloadWorker(QThread):
+    progress = pyqtSignal(float)
+    info = pyqtSignal(str)
+    finished = pyqtSignal(str)   # emits final path
+    error = pyqtSignal(str)
+
+    def __init__(self, stream, download_path: Path, use_ffmpeg: bool = False):
+        super().__init__()
+        self.stream = stream
+        self.download_path = download_path
+        self.use_ffmpeg = use_ffmpeg
+
+    def run(self):
+        try:
+            from anipy_api.download import Downloader
+            dl = Downloader(
+                progress_callback=lambda p: self.progress.emit(p),
+                info_callback=lambda msg, exc_info=None: self.info.emit(msg),
+            )
+            path = dl.download(
+                self.stream,
+                self.download_path,
+                ffmpeg=self.use_ffmpeg,
+            )
+            self.finished.emit(str(path))
+        except Exception as e:
+            self.error.emit(str(e))
