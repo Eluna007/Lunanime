@@ -88,7 +88,23 @@ def _read_cookies(profile: Path, domain: str) -> dict[str, str]:
     return cookies
 
 
-_FF_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
+def _get_firefox_ua() -> str:
+    """Get the actual installed Firefox version to build a matching UA string."""
+    import subprocess
+    try:
+        out = subprocess.check_output(["firefox", "--version"], text=True, timeout=5).strip()
+        # "Mozilla Firefox 151.0.2" → "151"
+        import re
+        m = re.search(r'(\d+)\.\d', out)
+        if m:
+            major = m.group(1)
+            return f"Mozilla/5.0 (X11; Linux x86_64; rv:{major}.0) Gecko/20100101 Firefox/{major}.0"
+    except Exception:
+        pass
+    return "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0"
+
+
+_FF_UA = _get_firefox_ua()
 
 _BASE_HEADERS = {
     "User-Agent": _FF_UA,
@@ -116,9 +132,11 @@ def make_session(domain: str, extra_headers: dict | None = None):
     try:
         from curl_cffi.requests import Session
         session = Session(impersonate="firefox")
+        # Override UA after impersonation so it matches the actual installed Firefox
         session.headers.update(headers)
         for name, value in cookies.items():
             session.cookies.set(name, value, domain=f".{domain}")
+            session.cookies.set(name, value)  # also set without domain prefix
         return session
     except ImportError:
         import requests

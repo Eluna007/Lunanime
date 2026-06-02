@@ -637,51 +637,48 @@ class WeebCentralSearchWorker(QThread):
     def run(self):
         try:
             import re
+            import requests as _requests
             from bs4 import BeautifulSoup
-            session = _wc_session()
+            from apumachi.firefox_cookies import _FF_UA
 
-            # WeebCentral uses HTMX — results come from /search/data, not the shell page
-            r = session.get(
+            # WeebCentral doesn't need cookies (returns 200 without them).
+            # Use plain requests — curl-cffi impersonate strips custom HTMX headers.
+            s = _requests.Session()
+            s.headers.update({
+                "User-Agent": _FF_UA,
+                "HX-Request": "true",
+                "HX-Target": "search-results",
+                "HX-Current-URL": f"{_WC_BASE}/search",
+                "Referer": f"{_WC_BASE}/search",
+                "Accept": "text/html, */*",
+            })
+            r = s.get(
                 f"{_WC_BASE}/search/data",
-                params={
-                    "text": self.query,
-                    "limit": self.limit,
-                    "offset": 0,
-                    "sort": "Best Match",
-                    "order": "asc",
-                    "official": "Any",
-                    "display_mode": "Minimal Display",
-                },
-                headers={
-                    "HX-Request": "true",
-                    "HX-Target": "search-results",
-                    "HX-Current-URL": f"{_WC_BASE}/search",
-                    "Referer": f"{_WC_BASE}/search",
-                    "Accept": "text/html, */*",
-                },
+                params={"text": self.query, "author": "", "display_mode": "Minimal Display"},
                 timeout=15,
             )
             r.raise_for_status()
 
+            # Results are <article> elements; title is in <a data-tip="...">
             soup = BeautifulSoup(r.text, "html.parser")
             results = []
-            seen = set()
-
-            for a in soup.select("a[href*='/series/']"):
+            for article in soup.select("article"):
+                a = article.select_one("a[href*='/series/']")
+                if not a:
+                    continue
                 href = a.get("href", "")
                 m = re.search(r'/series/([^/?#]+)', href)
                 if not m:
                     continue
                 mid = m.group(1)
-                if mid in seen or mid.lower() == "random":
+                if mid.lower() == "random":
                     continue
-                seen.add(mid)
-                img = a.find("img")
-                cover = (img.get("src") or img.get("data-src", "")) if img else ""
-                title = (img.get("alt", "").strip() if img else "") or a.get("title", "").strip() or a.get_text(strip=True) or mid
-                if len(title) < 2:
-                    continue
-                results.append(MangaResult(mid, title, "", cover, "", []))
+                title = a.get("data-tip", "").strip() or a.get_text(strip=True).strip() or mid
+                tags = [s.get_text(strip=True).rstrip(",") for s in article.select("section span")]
+                status_divs = article.select("section div")
+                status = next((d.get_text(strip=True).lower() for d in status_divs
+                               if d.get_text(strip=True).lower() in ("complete", "ongoing", "hiatus")), "")
+                results.append(MangaResult(mid, title, "", "", status, tags[:6]))
                 if len(results) >= self.limit:
                     break
 
