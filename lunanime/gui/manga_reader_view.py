@@ -11,15 +11,20 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint
 from PyQt6.QtGui import QPixmap, QKeyEvent, QWheelEvent
 
 from .workers import (MangaPagesWorker, WeebCentralPagesWorker,
-                      MangaFirePagesWorker, MangaPillPagesWorker, ImageWorker)
+                      MangaFirePagesWorker, MangaPillPagesWorker,
+                      MangakakalotPagesWorker, MangaKatanaPagesWorker,
+                      ReadAllComicsPagesWorker, ImageWorker)
 from .. import db
 
 # source key -> (pages worker, referer needed by the image CDN)
 _PAGE_SOURCES = {
-    "mangadex":    (MangaPagesWorker,       ""),
-    "weebcentral": (WeebCentralPagesWorker, "https://weebcentral.com/"),
-    "mangafire":   (MangaFirePagesWorker,   "https://mangafire.to/"),
-    "mangapill":   (MangaPillPagesWorker,   "https://mangapill.com/"),
+    "mangadex":      (MangaPagesWorker,         ""),
+    "weebcentral":   (WeebCentralPagesWorker,   "https://weebcentral.com/"),
+    "mangafire":     (MangaFirePagesWorker,     "https://mangafire.to/"),
+    "mangapill":     (MangaPillPagesWorker,     "https://mangapill.com/"),
+    "mangakakalot":  (MangakakalotPagesWorker,  "https://www.mangakakalot.gg/"),
+    "mangakatana":   (MangaKatanaPagesWorker,   "https://mangakatana.com/"),
+    "readallcomics": (ReadAllComicsPagesWorker, "https://readallcomics.com/"),
 }
 
 _ZOOM_MIN = 0.3

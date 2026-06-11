@@ -20,14 +20,22 @@ A desktop anime streaming and manga reading app for Linux, built with PyQt6.
 
 ## Sources
 
-| Type  | Source      | Notes                                          |
-|-------|-------------|------------------------------------------------|
-| Anime | AllManga    | API-based, sub + dub                            |
-| Anime | AnimePahe   | Uses your Firefox cookies to pass DDoS-Guard    |
-| Manga | MangaDex    | Official API, multi-language                    |
-| Manga | WeebCentral | HTML source                                     |
-| Manga | MangaFire   | Uses your Firefox cookies to pass Cloudflare    |
-| Manga | MangaPill   | HTML source, English                            |
+| Type   | Source        | Notes                                          |
+|--------|---------------|------------------------------------------------|
+| Anime  | AllManga      | API-based, sub + dub                            |
+| Anime  | AnimePahe     | Auto-solves DDoS-Guard; sub + dub               |
+| Manga  | MangaDex      | Official API, multi-language                    |
+| Manga  | WeebCentral   | HTML source                                     |
+| Manga  | MangaFire     | Uses your Firefox cookies to pass Cloudflare    |
+| Manga  | MangaPill     | HTML source, English                            |
+| Manga  | Mangakakalot  | JSON chapter API — returns the full list        |
+| Manga  | MangaKatana   | HTML source, English                            |
+| Comics | ReadAllComics | Western comics (Marvel / DC / etc.)             |
+
+Some manga on MangaDex are missing chapters (licensed releases are
+external links, or simply were never uploaded there). The added Mangakakalot
+and MangaKatana sources usually carry the complete chapter list, and
+ReadAllComics covers western comics that none of the manga sources have.
 
 Sources behind Cloudflare/DDoS-Guard work by reusing cookies from your local
 Firefox profile — visit the site once in Firefox if a source stops responding.

@@ -17,16 +17,22 @@ from .workers import (MangaSearchWorker, MangaChaptersWorker,
                       WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralMetaWorker,
                       MangaFireSearchWorker, MangaFireChaptersWorker,
                       MangaPillSearchWorker, MangaPillChaptersWorker,
-                      MangaDexBrowseWorker)
+                      MangakakalotSearchWorker, MangakakalotChaptersWorker,
+                      MangaKatanaSearchWorker, MangaKatanaChaptersWorker,
+                      ReadAllComicsSearchWorker, ReadAllComicsChaptersWorker,
+                      ReadAllComicsBrowseWorker, MangaDexBrowseWorker)
 from .home_view import _HScrollSection
 from .. import db
 
 # source key -> (display name, search worker, chapters worker)
 MANGA_SOURCES = {
-    "mangadex":    ("MangaDex",    MangaSearchWorker,       MangaChaptersWorker),
-    "weebcentral": ("WeebCentral", WeebCentralSearchWorker, WeebCentralChaptersWorker),
-    "mangafire":   ("MangaFire",   MangaFireSearchWorker,   MangaFireChaptersWorker),
-    "mangapill":   ("MangaPill",   MangaPillSearchWorker,   MangaPillChaptersWorker),
+    "mangadex":      ("MangaDex",     MangaSearchWorker,        MangaChaptersWorker),
+    "weebcentral":   ("WeebCentral",  WeebCentralSearchWorker,  WeebCentralChaptersWorker),
+    "mangafire":     ("MangaFire",    MangaFireSearchWorker,    MangaFireChaptersWorker),
+    "mangapill":     ("MangaPill",    MangaPillSearchWorker,    MangaPillChaptersWorker),
+    "mangakakalot":  ("Mangakakalot", MangakakalotSearchWorker, MangakakalotChaptersWorker),
+    "mangakatana":   ("MangaKatana",  MangaKatanaSearchWorker,  MangaKatanaChaptersWorker),
+    "readallcomics": ("Comics (RAC)", ReadAllComicsSearchWorker, ReadAllComicsChaptersWorker),
 }
 
 
@@ -77,7 +83,7 @@ class MangaView(QWidget):
         self._source_combo = QComboBox()
         for key, (name, _, _) in MANGA_SOURCES.items():
             self._source_combo.addItem(name, key)
-        self._source_combo.setFixedWidth(120)
+        self._source_combo.setFixedWidth(140)
         self._source_combo.currentIndexChanged.connect(self._on_source_changed)
         bar.addWidget(self._source_combo)
 
@@ -115,6 +121,10 @@ class MangaView(QWidget):
         self._hot_section = _HScrollSection("⭐  Hot New  (MangaDex)")
         self._hot_section.card_clicked.connect(self._on_discover_card)
         dl.addWidget(self._hot_section)
+
+        self._comics_section = _HScrollSection("🦸  Popular Comics  (ReadAllComics)")
+        self._comics_section.card_clicked.connect(self._on_discover_card)
+        dl.addWidget(self._comics_section)
 
         dl.addStretch()
         discover_scroll.setWidget(discover_inner)
@@ -213,24 +223,26 @@ class MangaView(QWidget):
         self.refresh_continue_reading()
         if not self._discover_loaded:
             self._discover_loaded = True
-            self._load_browse_section(self._trending_section, "trending")
-            self._load_browse_section(self._hot_section, "hot")
+            self._load_browse_section(self._trending_section, MangaDexBrowseWorker(mode="trending", limit=20))
+            self._load_browse_section(self._hot_section, MangaDexBrowseWorker(mode="hot", limit=20))
+            self._load_browse_section(self._comics_section, ReadAllComicsBrowseWorker(limit=20),
+                                      source="readallcomics")
 
-    def _load_browse_section(self, section, mode):
+    def _load_browse_section(self, section, worker, source="mangadex"):
         section.set_placeholder("Loading…")
-        w = MangaDexBrowseWorker(mode=mode, limit=20)
-        w.results_ready.connect(lambda r, sec=section: self._fill_section(sec, r))
-        w.error.connect(lambda e, sec=section: sec.set_placeholder(f"Error: {e}"))
-        w.start()
-        self._browse_workers.append(w)
+        worker.results_ready.connect(
+            lambda r, sec=section, src=source: self._fill_section(sec, r, src))
+        worker.error.connect(lambda e, sec=section: sec.set_placeholder(f"Error: {e}"))
+        worker.start()
+        self._browse_workers.append(worker)
 
-    def _fill_section(self, section, results):
+    def _fill_section(self, section, results, source="mangadex"):
         section.clear()
         if not results:
             section.set_placeholder("Nothing found.")
             return
         for manga in results:
-            manga.source = "mangadex"
+            manga.source = source
             card = section.add_card(manga)
             if manga.cover_url:
                 card.load_image(manga.cover_url)
