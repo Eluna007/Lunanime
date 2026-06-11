@@ -202,7 +202,7 @@ class SeasonsView(QWidget):
         self._status_label.setText("Loading...")
 
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
+            self._worker.retire()
 
         if self._src_anilist.isChecked():
             self._worker = AniListWorker(

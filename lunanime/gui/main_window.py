@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.anime_view)      # 6
 
         self.manga_reader_view = MangaReaderView()
-        self.manga_reader_view.back_requested.connect(lambda: self._nav_to("manga"))
+        self.manga_reader_view.back_requested.connect(self._on_reader_back)
         self.stack.addWidget(self.manga_reader_view)  # 7
 
         self._prev_nav_key = "home"
@@ -174,6 +174,10 @@ class MainWindow(QMainWindow):
 
     def _on_download_started(self, name, episode, worker):
         self.downloads_view.add_active_download(name, episode, worker)
+
+    def _on_reader_back(self):
+        self._nav_to("manga")
+        self.manga_view.refresh_continue_reading()
 
     def _open_reader(self, manga, chapters, chapter):
         self.manga_reader_view.open(manga, chapters, chapter)

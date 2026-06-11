@@ -140,7 +140,7 @@ class DownloadsView(QWidget):
         widget.cancel_requested.connect(worker.terminate)
         worker.progress.connect(widget.set_progress)
         worker.info.connect(widget.set_status)
-        worker.finished.connect(lambda path, w=widget: self._on_finished(w, path))
+        worker.done.connect(lambda path, w=widget: self._on_finished(w, path))
         worker.error.connect(lambda err, w=widget: self._on_error(w, err))
         self._active_area.addWidget(widget)
         self._active_widgets.append(widget)

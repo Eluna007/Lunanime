@@ -6,8 +6,39 @@ from anipy_api.provider.base import LanguageTypeEnum
 _IMAGE_CACHE: dict[str, bytes] = {}
 _IMAGE_CACHE_MAX = 200
 
+# Strong references to running workers. A QThread that loses its last
+# Python reference while running is destroyed mid-run, which aborts the
+# entire application ("QThread: Destroyed while thread is still running").
+_ACTIVE_WORKERS: set = set()
 
-class SearchWorker(QThread):
+
+class Worker(QThread):
+    """Base for all background workers: keeps itself alive while running
+    and offers retire() to drop a stale worker without terminate()."""
+
+    def start(self, *args):
+        _ACTIVE_WORKERS.add(self)
+        self.finished.connect(lambda: _ACTIVE_WORKERS.discard(self))
+        super().start(*args)
+
+    _RESULT_SIGNALS = ("results_ready", "error", "info_ready", "episodes_ready",
+                       "stream_ready", "image_ready", "meta_ready", "done",
+                       "progress", "info", "success")
+
+    def retire(self):
+        """Detach result listeners; the thread finishes on its own and its
+        late results are ignored. Safer than terminate(), which can kill
+        the thread mid-request and corrupt state."""
+        for name in self._RESULT_SIGNALS:
+            sig = getattr(self, name, None)
+            if sig is not None:
+                try:
+                    sig.disconnect()
+                except TypeError:
+                    pass  # no connections on this signal
+
+
+class SearchWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -27,7 +58,7 @@ class SearchWorker(QThread):
             self.error.emit(str(e))
 
 
-class InfoWorker(QThread):
+class InfoWorker(Worker):
     info_ready = pyqtSignal(object)
     error = pyqtSignal(str)
 
@@ -44,7 +75,7 @@ class InfoWorker(QThread):
             self.error.emit(str(e))
 
 
-class EpisodesWorker(QThread):
+class EpisodesWorker(Worker):
     episodes_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -62,7 +93,7 @@ class EpisodesWorker(QThread):
             self.error.emit(str(e))
 
 
-class StreamWorker(QThread):
+class StreamWorker(Worker):
     stream_ready = pyqtSignal(object)
     error = pyqtSignal(str)
 
@@ -84,7 +115,7 @@ class StreamWorker(QThread):
             self.error.emit(str(e))
 
 
-class ImageWorker(QThread):
+class ImageWorker(Worker):
     image_ready = pyqtSignal(bytes)
 
     def __init__(self, url: str, referer: str = ""):
@@ -112,7 +143,7 @@ class ImageWorker(QThread):
             pass
 
 
-class TrendingWorker(QThread):
+class TrendingWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -141,7 +172,7 @@ class AniListResult:
         self.image_url = image_url
 
 
-class AniListWorker(QThread):
+class AniListWorker(Worker):
     """Fetches trending or seasonal anime from AniList's public GraphQL API."""
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
@@ -211,7 +242,7 @@ class JikanResult:
         self.episodes = episodes
 
 
-class JikanWorker(QThread):
+class JikanWorker(Worker):
     """Fetches seasonal anime from Jikan (unofficial MAL REST API, no auth)."""
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
@@ -259,8 +290,8 @@ class JikanWorker(QThread):
             self.error.emit(str(e))
 
 
-class AutoPlayWorker(QThread):
-    finished = pyqtSignal()
+class AutoPlayWorker(Worker):
+    done = pyqtSignal()
 
     def __init__(self, player):
         super().__init__()
@@ -271,13 +302,13 @@ class AutoPlayWorker(QThread):
             self.player.wait()
         except Exception:
             pass
-        self.finished.emit()
+        self.done.emit()
 
 
-class DownloadWorker(QThread):
+class DownloadWorker(Worker):
     progress = pyqtSignal(float)
     info = pyqtSignal(str)
-    finished = pyqtSignal(str)   # emits final path
+    done = pyqtSignal(str)       # emits final path
     error = pyqtSignal(str)
 
     def __init__(self, stream, download_path: Path, use_ffmpeg: bool = False):
@@ -298,12 +329,12 @@ class DownloadWorker(QThread):
                 self.download_path,
                 ffmpeg=self.use_ffmpeg,
             )
-            self.finished.emit(str(path))
+            self.done.emit(str(path))
         except Exception as e:
             self.error.emit(str(e))
 
 
-class OAuthWorker(QThread):
+class OAuthWorker(Worker):
     """Runs an OAuth connect flow in a thread (opens browser, waits for callback)."""
     success = pyqtSignal(str)   # username
     error   = pyqtSignal(str)
@@ -329,7 +360,7 @@ class OAuthWorker(QThread):
             self.error.emit(str(e))
 
 
-class TrackingWorker(QThread):
+class TrackingWorker(Worker):
     """Syncs a watched episode to AniList and/or MAL. Silent failures."""
 
     def __init__(self, title: str, episode: int, provider: str, identifier: str):
@@ -379,7 +410,7 @@ _MDX = "https://api.mangadex.org"
 _CDN = "https://uploads.mangadex.org"
 
 
-class MangaSearchWorker(QThread):
+class MangaSearchWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -404,7 +435,39 @@ class MangaSearchWorker(QThread):
             self.error.emit(str(e))
 
 
-class MangaChaptersWorker(QThread):
+class MangaDexBrowseWorker(Worker):
+    """Browse MangaDex without a query: trending (most followed) or
+    hot (most followed among recently created titles)."""
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, mode: str = "trending", limit: int = 20):
+        super().__init__()
+        self.mode = mode    # "trending" | "hot"
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests
+            from datetime import datetime, timedelta
+            params = {
+                "limit": self.limit,
+                "contentRating[]": ["safe", "suggestive"],
+                "includes[]": ["cover_art"],
+                "order[followedCount]": "desc",
+                "hasAvailableChapters": "true",
+            }
+            if self.mode == "hot":
+                since = datetime.utcnow() - timedelta(days=90)
+                params["createdAtSince"] = since.strftime("%Y-%m-%dT%H:%M:%S")
+            r = requests.get(f"{_MDX}/manga", params=params, timeout=15)
+            r.raise_for_status()
+            self.results_ready.emit(_parse_manga_list(r.json()["data"]))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaChaptersWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -447,7 +510,7 @@ class MangaChaptersWorker(QThread):
             self.error.emit(str(e))
 
 
-class MangaPagesWorker(QThread):
+class MangaPagesWorker(Worker):
     results_ready = pyqtSignal(list)   # list of page URLs
     error = pyqtSignal(str)
 
@@ -503,7 +566,7 @@ def _wc_session():
     return make_session("weebcentral.com", {"Referer": _WC_BASE + "/"})
 
 
-class WeebCentralSearchWorker(QThread):
+class WeebCentralSearchWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -565,7 +628,7 @@ class WeebCentralSearchWorker(QThread):
             self.error.emit(str(e))
 
 
-class WeebCentralMetaWorker(QThread):
+class WeebCentralMetaWorker(Worker):
     """Fetches cover URL and description for a WeebCentral series."""
     meta_ready = pyqtSignal(str, str)   # cover_url, description
     error = pyqtSignal(str)
@@ -613,7 +676,7 @@ class WeebCentralMetaWorker(QThread):
             self.error.emit(str(e))
 
 
-class WeebCentralChaptersWorker(QThread):
+class WeebCentralChaptersWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -653,7 +716,7 @@ class WeebCentralChaptersWorker(QThread):
             self.error.emit(str(e))
 
 
-class WeebCentralPagesWorker(QThread):
+class WeebCentralPagesWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -699,7 +762,7 @@ def _mf_session():
     return make_session("mangafire.to", {"Referer": _MF_BASE + "/"})
 
 
-class MangaFireSearchWorker(QThread):
+class MangaFireSearchWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -740,7 +803,7 @@ class MangaFireSearchWorker(QThread):
             self.error.emit(str(e))
 
 
-class MangaFireChaptersWorker(QThread):
+class MangaFireChaptersWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -783,7 +846,7 @@ class MangaFireChaptersWorker(QThread):
             self.error.emit(str(e))
 
 
-class MangaFirePagesWorker(QThread):
+class MangaFirePagesWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -830,7 +893,7 @@ _MP_HEADERS = {
 }
 
 
-class MangaPillSearchWorker(QThread):
+class MangaPillSearchWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -878,7 +941,7 @@ class MangaPillSearchWorker(QThread):
             self.error.emit(str(e))
 
 
-class MangaPillChaptersWorker(QThread):
+class MangaPillChaptersWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 
@@ -914,7 +977,7 @@ class MangaPillChaptersWorker(QThread):
             self.error.emit(str(e))
 
 
-class MangaPillPagesWorker(QThread):
+class MangaPillPagesWorker(Worker):
     results_ready = pyqtSignal(list)
     error = pyqtSignal(str)
 

@@ -7,7 +7,9 @@ A desktop anime streaming and manga reading app for Linux, built with PyQt6.
 - **Anime**: search, browse seasonal charts, and stream episodes through an
   external player (mpv, vlc, …) with sub/dub and quality selection.
 - **Manga**: search across multiple sources, read chapters in a built-in
-  vertical-scroll reader with zoom and lazy page loading.
+  vertical-scroll reader with zoom and lazy page loading. The manga tab
+  opens on a discover page with Continue Reading, Trending, and Hot New
+  sections (clear the search box to get back to it).
 - **Discover**: trending and seasonal anime from AniList and MyAnimeList
   (Jikan), playable through any configured anime provider.
 - **Tracking**: optional AniList and MyAnimeList sync of watched episodes
