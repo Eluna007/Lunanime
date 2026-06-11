@@ -21,6 +21,9 @@ def main():
     app.setApplicationName("Lunanime")
     app.setOrganizationName("Lunanime")
 
+    from lunanime.gui.workers import shutdown_workers
+    app.aboutToQuit.connect(shutdown_workers)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

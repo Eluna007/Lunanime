@@ -12,6 +12,17 @@ _IMAGE_CACHE_MAX = 200
 _ACTIVE_WORKERS: set = set()
 
 
+def shutdown_workers(timeout_ms: int = 2000):
+    """Wait briefly for running workers to finish so the app can exit
+    cleanly instead of aborting with "QThread destroyed while running"."""
+    for w in list(_ACTIVE_WORKERS):
+        try:
+            w.retire()
+            w.wait(timeout_ms)
+        except Exception:
+            pass
+
+
 class Worker(QThread):
     """Base for all background workers: keeps itself alive while running
     and offers retire() to drop a stale worker without terminate()."""
@@ -493,6 +504,10 @@ class MangaChaptersWorker(Worker):
                 batch = data["data"]
                 for ch in batch:
                     attrs = ch["attributes"]
+                    # externalUrl-only chapters (licensed releases) have no
+                    # readable pages on MangaDex and just error when opened
+                    if attrs.get("externalUrl"):
+                        continue
                     num   = attrs.get("chapter") or "?"
                     title = attrs.get("title") or ""
                     lang  = attrs.get("translatedLanguage", "en")
@@ -997,6 +1012,405 @@ class MangaPillPagesWorker(Worker):
             urls = []
             for img in soup.select("picture img, img.js-page"):
                 src = img.get("data-src", "") or img.get("src", "")
+                if src.startswith("http"):
+                    urls.append(src)
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+# ── Mangakakalot workers ──────────────────────────────────────────────────────
+# Successor of the old manganato family; chapter list comes from a JSON API,
+# so it reliably returns the complete list.
+
+_MKK_BASE = "https://www.mangakakalot.gg"
+
+_MKK_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+    "Referer": _MKK_BASE + "/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _fmt_chnum(num) -> str:
+    try:
+        f = float(num)
+        return str(int(f)) if f == int(f) else str(f)
+    except (TypeError, ValueError):
+        return str(num) if num else "?"
+
+
+class MangakakalotSearchWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            slug_query = re.sub(r"[^a-z0-9]+", "_", self.query.lower()).strip("_")
+            r = requests.get(f"{_MKK_BASE}/search/story/{slug_query}",
+                             params={"page": 1}, headers=_MKK_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            results = []
+            for item in soup.select(".panel_story_list .story_item, "
+                                    "div.list-truyen-item-wrap, div.list-comic-item-wrap"):
+                a = item.select_one("h3 a") or item.select_one("a[href*='/manga/']")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                m = re.search(r'/manga/([^/?#]+)', href)
+                if not m:
+                    continue
+                img = item.select_one("img")
+                cover = (img.get("src", "") or img.get("data-src", "")) if img else ""
+                results.append(MangaResult(m.group(1), a.get_text(strip=True),
+                                           "", cover, "", []))
+                if len(results) >= self.limit:
+                    break
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangakakalotChaptersWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str, lang: str = "en"):
+        super().__init__()
+        self.manga_id = manga_id
+        self.lang = lang
+
+    def run(self):
+        try:
+            import requests
+            r = requests.get(f"{_MKK_BASE}/api/manga/{self.manga_id}/chapters",
+                             params={"limit": -1}, headers=_MKK_HEADERS, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            chapters = []
+            for ch in (data.get("data") or {}).get("chapters") or []:
+                ch_slug = ch.get("slug")
+                if not ch_slug:
+                    continue
+                num = _fmt_chnum(ch.get("num"))
+                name = ch.get("name") or ""
+                # drop the redundant "Chapter N" prefix from the title field
+                title = "" if name.lower().startswith("chapter") else name
+                chapters.append(MangaChapter(f"{self.manga_id}/{ch_slug}",
+                                             num, title, "en", 0, ""))
+
+            def sortkey(c):
+                try:
+                    return float(c.chapter_num)
+                except ValueError:
+                    return 0.0
+            chapters.sort(key=sortkey)
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangakakalotPagesWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_id: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_id = chapter_id
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_MKK_BASE}/manga/{self.chapter_id}",
+                             headers=_MKK_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            def extract_array(content, name):
+                m = re.search(rf'{name}\s*=\s*\[([^\]]+)\]', content)
+                if not m:
+                    return []
+                return [p.strip().strip('"\'').replace("\\/", "/").rstrip("/")
+                        for p in m.group(1).split(",") if p.strip().strip('"\'')]
+
+            script = "\n".join(s.string or "" for s in soup.select("script")
+                               if s.string and "cdns" in s.string)
+            cdns = extract_array(script, "cdns")
+            images = extract_array(script, "chapterImages")
+            urls = []
+            if cdns and images:
+                base = cdns[0]
+                urls = [f"{base}/{path.lstrip('/')}" for path in images]
+            else:
+                for img in soup.select("div.container-chapter-reader > img"):
+                    src = img.get("src", "") or img.get("data-src", "")
+                    if src.startswith("http"):
+                        urls.append(src)
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ── MangaKatana workers ───────────────────────────────────────────────────────
+
+_MK_BASE = "https://mangakatana.com"
+
+_MK_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+    "Referer": _MK_BASE + "/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+class MangaKatanaSearchWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_MK_BASE}/page/1",
+                             params={"search": self.query, "search_by": "book_name"},
+                             headers=_MK_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            results = []
+
+            # a single match redirects straight to the manga page
+            single = re.match(rf'{re.escape(_MK_BASE)}/manga/([^/?#]+)/?$', r.url)
+            if single and soup.select_one("h1.heading"):
+                title = soup.select_one("h1.heading").get_text(strip=True)
+                img = soup.select_one("div.media div.cover img")
+                cover = img.get("src", "") if img else ""
+                results.append(MangaResult(single.group(1), title, "", cover, "", []))
+            else:
+                for item in soup.select("div#book_list > div.item"):
+                    a = item.select_one("div.text > h3 > a")
+                    if not a:
+                        continue
+                    m = re.search(r'/manga/([^/?#]+)', a.get("href", ""))
+                    if not m:
+                        continue
+                    img = item.select_one("img")
+                    cover = (img.get("src", "") or img.get("data-src", "")) if img else ""
+                    results.append(MangaResult(m.group(1), a.get_text(strip=True),
+                                               "", cover, "", []))
+                    if len(results) >= self.limit:
+                        break
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaKatanaChaptersWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str, lang: str = "en"):
+        super().__init__()
+        self.manga_id = manga_id
+        self.lang = lang
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_MK_BASE}/manga/{self.manga_id}",
+                             headers=_MK_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            chapters = []
+            for row in soup.select("tr:has(.chapter)"):
+                a = row.select_one("a")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                text = a.get_text(strip=True)
+                nm = re.search(r'(\d+(?:\.\d+)?)', text)
+                num = nm.group(1) if nm else "?"
+                chapters.append(MangaChapter(href, num, "", "en", 0, ""))
+            chapters.reverse()   # site lists newest first
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaKatanaPagesWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_url: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_url = chapter_url
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            import re
+            import requests
+            r = requests.get(self.chapter_url, headers=_MK_HEADERS, timeout=15)
+            r.raise_for_status()
+            # image URLs sit in a JS array referenced next to 'data-src'
+            name_m = re.search(r'''data-src['"],\s*(\w+)''', r.text)
+            urls = []
+            if name_m:
+                arr_m = re.search(rf'var\s+{name_m.group(1)}\s*=\s*\[([^\[\]]*)\]', r.text)
+                if arr_m:
+                    urls = [u for u in re.findall(r"'([^']*)'", arr_m.group(1))
+                            if u.startswith("http")]
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ── ReadAllComics workers (western comics) ────────────────────────────────────
+
+_RAC_BASE = "https://readallcomics.com"
+
+_RAC_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+    "Referer": _RAC_BASE + "/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _rac_parse_list(soup, limit):
+    results = []
+    for li in soup.select("ul.list-story.categories li"):
+        a = li.select_one("a.cat-title") or li.select_one("a")
+        if not a:
+            continue
+        href = a.get("href", "")
+        if "/category/" not in href:
+            continue
+        img = li.select_one("img.book-cover") or li.select_one("img")
+        cover = (img.get("src", "") or img.get("data-src", "")) if img else ""
+        title = a.get("title", "").strip() or a.get_text(strip=True)
+        results.append(MangaResult(href, title, "", cover, "", []))
+        if len(results) >= limit:
+            break
+    return results
+
+
+class ReadAllComicsSearchWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_RAC_BASE}/",
+                             params={"story": self.query, "s": "", "type": "comic"},
+                             headers=_RAC_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            self.results_ready.emit(_rac_parse_list(soup, self.limit))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ReadAllComicsBrowseWorker(Worker):
+    """Popular comics from the readallcomics.com front page."""
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, limit: int = 20):
+        super().__init__()
+        self.limit = limit
+
+    def run(self):
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(_RAC_BASE + "/", headers=_RAC_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            self.results_ready.emit(_rac_parse_list(soup, self.limit))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ReadAllComicsChaptersWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, series_url: str, lang: str = "en"):
+        super().__init__()
+        self.series_url = series_url
+        self.lang = lang
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(self.series_url, headers=_RAC_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            chapters = []
+            for a in soup.select(".list-story a"):
+                href = a.get("href", "")
+                if not href or "/category/" in href:
+                    continue
+                name = a.get_text(strip=True)
+                # prefer the "#NNN" issue number; else the first number
+                nm = re.search(r'#\s*(\d+(?:\.\d+)?)', name) or \
+                     re.search(r'(\d+(?:\.\d+)?)', name)
+                num = nm.group(1) if nm else "?"
+                chapters.append(MangaChapter(href, num, name, "en", 0, ""))
+            chapters.reverse()   # newest issues first on the site
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class ReadAllComicsPagesWorker(Worker):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, issue_url: str, data_saver: bool = False):
+        super().__init__()
+        self.issue_url = issue_url
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(self.issue_url, headers=_RAC_HEADERS, timeout=20)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            logo_imgs = set(id(img) for img in soup.select("div#logo img"))
+            urls = []
+            for img in soup.select("body img"):
+                if id(img) in logo_imgs:
+                    continue
+                src = img.get("src", "") or img.get("data-src", "")
                 if src.startswith("http"):
                     urls.append(src)
             self.results_ready.emit(urls)
