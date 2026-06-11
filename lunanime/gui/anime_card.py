@@ -28,10 +28,11 @@ class AnimeCard(QWidget):
 
         name_label = QLabel(result.name)
         name_label.setWordWrap(True)
-        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_label.setStyleSheet("font-size: 10px; color: #c0c0d0; background: transparent;")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        name_label.setStyleSheet("font-size: 11px; color: #c0c0d0; background: transparent;")
         name_label.setFixedHeight(30)
         layout.addWidget(name_label)
+        self.setToolTip(result.name)
 
     def set_image(self, data: bytes):
         pix = QPixmap()

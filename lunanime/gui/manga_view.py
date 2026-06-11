@@ -14,9 +14,18 @@ from PyQt6.QtGui import QPixmap
 from .anime_card import AnimeCard
 from .workers import (MangaSearchWorker, MangaChaptersWorker,
                       ImageWorker, MangaResult, MangaChapter,
-                      WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralPagesWorker,
-                      MangaFireSearchWorker, MangaFireChaptersWorker, MangaFirePagesWorker)
+                      WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralMetaWorker,
+                      MangaFireSearchWorker, MangaFireChaptersWorker,
+                      MangaPillSearchWorker, MangaPillChaptersWorker)
 from .. import db
+
+# source key -> (display name, search worker, chapters worker)
+MANGA_SOURCES = {
+    "mangadex":    ("MangaDex",    MangaSearchWorker,       MangaChaptersWorker),
+    "weebcentral": ("WeebCentral", WeebCentralSearchWorker, WeebCentralChaptersWorker),
+    "mangafire":   ("MangaFire",   MangaFireSearchWorker,   MangaFireChaptersWorker),
+    "mangapill":   ("MangaPill",   MangaPillSearchWorker,   MangaPillChaptersWorker),
+}
 
 
 class MangaView(QWidget):
@@ -29,6 +38,7 @@ class MangaView(QWidget):
         self._meta_worker     = None
         self._current_manga   = None
         self._chapters        = []
+        self._result_cards    = []
         self._source          = "mangadex"
         self._setup_ui()
 
@@ -59,9 +69,8 @@ class MangaView(QWidget):
         bar.addWidget(search_btn)
 
         self._source_combo = QComboBox()
-        self._source_combo.addItem("MangaDex", "mangadex")
-        self._source_combo.addItem("WeebCentral", "weebcentral")
-        self._source_combo.addItem("MangaFire", "mangafire")
+        for key, (name, _, _) in MANGA_SOURCES.items():
+            self._source_combo.addItem(name, key)
         self._source_combo.setFixedWidth(120)
         self._source_combo.currentIndexChanged.connect(self._on_source_changed)
         bar.addWidget(self._source_combo)
@@ -166,8 +175,8 @@ class MangaView(QWidget):
 
     def _on_source_changed(self):
         self._source = self._source_combo.currentData()
-        names = {"mangadex": "MangaDex", "weebcentral": "WeebCentral", "mangafire": "MangaFire"}
-        self._search_input.setPlaceholderText(f"Search manga on {names.get(self._source, self._source)}…")
+        name = MANGA_SOURCES[self._source][0]
+        self._search_input.setPlaceholderText(f"Search manga on {name}…")
         self._clear_results()
         self._current_manga = None
         self._ch_list.clear()
@@ -178,16 +187,11 @@ class MangaView(QWidget):
         if not query:
             return
         self._clear_results()
-        source_name = {"mangadex": "MangaDex", "weebcentral": "WeebCentral", "mangafire": "MangaFire"}.get(self._source, self._source)
+        source_name, search_cls, _ = MANGA_SOURCES[self._source]
         self._status.setText(f"Searching {source_name}…")
         if self._search_worker and self._search_worker.isRunning():
             self._search_worker.terminate()
-        if self._source == "weebcentral":
-            self._search_worker = WeebCentralSearchWorker(query)
-        elif self._source == "mangafire":
-            self._search_worker = MangaFireSearchWorker(query)
-        else:
-            self._search_worker = MangaSearchWorker(query)
+        self._search_worker = search_cls(query)
         self._search_worker.results_ready.connect(self._on_results)
         self._search_worker.error.connect(lambda e: self._status.setText(f"Error: {e}"))
         self._search_worker.start()
@@ -195,15 +199,26 @@ class MangaView(QWidget):
     def _on_results(self, results):
         self._clear_results()
         self._status.setText(f"{len(results)} results" if results else "No results found.")
-        cols = max(1, 380 // 162)
-        for i, manga in enumerate(results):
+        for manga in results:
             card = AnimeCard(manga)
             card.clicked.connect(self._on_manga_selected)
-            self._results_grid.addWidget(card, i // cols, i % cols)
+            self._result_cards.append(card)
             if manga.cover_url:
                 card.load_image(manga.cover_url)
+        self._relayout_results()
+
+    def _relayout_results(self):
+        cols = max(1, (self._results_container.width() - 24) // 162)
+        for i, card in enumerate(self._result_cards):
+            self._results_grid.addWidget(card, i // cols, i % cols)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._result_cards:
+            self._relayout_results()
 
     def _clear_results(self):
+        self._result_cards = []
         while self._results_grid.count():
             item = self._results_grid.takeAt(0)
             if item.widget():
@@ -256,12 +271,8 @@ class MangaView(QWidget):
         lang = self._lang_combo.currentData()
         if self._chapters_worker and self._chapters_worker.isRunning():
             self._chapters_worker.terminate()
-        if self._source == "weebcentral":
-            self._chapters_worker = WeebCentralChaptersWorker(self._current_manga.manga_id, lang)
-        elif self._source == "mangafire":
-            self._chapters_worker = MangaFireChaptersWorker(self._current_manga.manga_id, lang)
-        else:
-            self._chapters_worker = MangaChaptersWorker(self._current_manga.manga_id, lang)
+        chapters_cls = MANGA_SOURCES[self._source][2]
+        self._chapters_worker = chapters_cls(self._current_manga.manga_id, lang)
         self._chapters_worker.results_ready.connect(self._on_chapters)
         self._chapters_worker.error.connect(lambda e: self._ch_list.clear() or
                                             self._ch_list.addItem(f"Error: {e}"))
