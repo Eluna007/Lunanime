@@ -20,7 +20,7 @@ _ERROR_HTML = b"""
 <html><head><style>body{font-family:sans-serif;background:#0f0f13;color:#e0e0e0;
 display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
 h2{color:#f87171;}</style></head>
-<body><h2>&#10007; Auth failed — no code received.</h2></body></html>
+<body><h2>&#10007; Auth failed &mdash; no code received.</h2></body></html>
 """
 
 

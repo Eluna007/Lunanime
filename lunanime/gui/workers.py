@@ -87,9 +87,10 @@ class StreamWorker(QThread):
 class ImageWorker(QThread):
     image_ready = pyqtSignal(bytes)
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, referer: str = ""):
         super().__init__()
         self.url = url
+        self.referer = referer or url
 
     def run(self):
         if self.url in _IMAGE_CACHE:
@@ -99,7 +100,7 @@ class ImageWorker(QThread):
             import requests
             res = requests.get(self.url, timeout=10, headers={
                 "User-Agent": "Mozilla/5.0",
-                "Referer": self.url,
+                "Referer": self.referer,
             })
             if res.ok:
                 if len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
@@ -315,7 +316,7 @@ class OAuthWorker(QThread):
 
     def run(self):
         try:
-            from apumachi import tracking
+            from lunanime import tracking
             if self.service == "anilist":
                 result = tracking.anilist_connect(self.client_id, self.client_secret)
             else:
@@ -339,7 +340,7 @@ class TrackingWorker(QThread):
         self.identifier = identifier
 
     def run(self):
-        from apumachi import tracking
+        from lunanime import tracking
         try:
             tracking.anilist_sync(self.title, self.episode, self.provider, self.identifier)
         except Exception:
@@ -472,129 +473,6 @@ class MangaPagesWorker(QThread):
             self.error.emit(str(e))
 
 
-# ── Comick workers ────────────────────────────────────────────────────────────
-
-_COMICK_API = "https://api.comick.fun"
-
-
-class ComickSearchWorker(QThread):
-    results_ready = pyqtSignal(list)
-    error = pyqtSignal(str)
-
-    def __init__(self, query: str, limit: int = 20):
-        super().__init__()
-        self.query = query
-        self.limit = limit
-
-    def run(self):
-        try:
-            import requests
-            r = requests.get(
-                f"{_COMICK_API}/v1.0/search/",
-                params={"q": self.query, "limit": self.limit, "page": 1},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15,
-            )
-            r.raise_for_status()
-            results = []
-            for m in r.json():
-                md = m.get("md_covers", [])
-                cover = ""
-                if md:
-                    b2_key = md[0].get("b2key") or md[0].get("gpurl", "")
-                    if b2_key:
-                        cover = f"https://meo.comick.pictures/{b2_key}"
-                title = m.get("title") or m.get("slug") or "Unknown"
-                desc = (m.get("desc") or "")[:400]
-                status_val = m.get("status") or 1
-                status = "ongoing" if status_val == 1 else "completed" if status_val == 2 else ""
-                tags = [g.get("name", "") for g in m.get("genres", [])][:6]
-                results.append(MangaResult(
-                    manga_id=m.get("slug", m.get("id", "")),
-                    title=title,
-                    description=desc,
-                    cover_url=cover,
-                    status=status,
-                    tags=tags,
-                ))
-            self.results_ready.emit(results)
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class ComickChaptersWorker(QThread):
-    results_ready = pyqtSignal(list)
-    error = pyqtSignal(str)
-
-    def __init__(self, manga_slug: str, lang: str = "en"):
-        super().__init__()
-        self.manga_slug = manga_slug
-        self.lang = lang
-
-    def run(self):
-        try:
-            import requests
-            chapters = []
-            page = 1
-            while True:
-                r = requests.get(
-                    f"{_COMICK_API}/comic/{self.manga_slug}/chapters",
-                    params={"lang": self.lang, "page": page, "limit": 99, "chap-order": 1},
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=15,
-                )
-                r.raise_for_status()
-                data = r.json()
-                batch = data.get("chapters", [])
-                if not batch:
-                    break
-                for ch in batch:
-                    hid = ch.get("hid", "")
-                    num = ch.get("chap") or "?"
-                    title = ch.get("title") or ""
-                    groups = ch.get("group_name", [])
-                    scanlator = groups[0] if groups else ""
-                    chapters.append(MangaChapter(hid, num, title, self.lang, 0, scanlator))
-                if len(batch) < 99:
-                    break
-                page += 1
-            self.results_ready.emit(chapters)
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class ComickPagesWorker(QThread):
-    results_ready = pyqtSignal(list)
-    error = pyqtSignal(str)
-
-    def __init__(self, chapter_hid: str, data_saver: bool = False):
-        super().__init__()
-        self.chapter_hid = chapter_hid
-        self.data_saver = data_saver
-
-    def run(self):
-        try:
-            import requests
-            r = requests.get(
-                f"{_COMICK_API}/chapter/{self.chapter_hid}",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-            images = data.get("chapter", {}).get("images", [])
-            urls = []
-            for img in images:
-                url = img.get("url") or img.get("b2key")
-                if url:
-                    if not url.startswith("http"):
-                        url = f"https://meo.comick.pictures/{url}"
-                    urls.append(url)
-            self.results_ready.emit(urls)
-        except Exception as e:
-            self.error.emit(str(e))
-
-
 def _parse_manga_list(data: list) -> list:
     results = []
     for m in data:
@@ -621,7 +499,7 @@ _WC_BASE = "https://weebcentral.com"
 
 
 def _wc_session():
-    from apumachi.firefox_cookies import make_session
+    from lunanime.firefox_cookies import make_session
     return make_session("weebcentral.com", {"Referer": _WC_BASE + "/"})
 
 
@@ -639,7 +517,7 @@ class WeebCentralSearchWorker(QThread):
             import re
             import requests as _requests
             from bs4 import BeautifulSoup
-            from apumachi.firefox_cookies import _FF_UA
+            from lunanime.firefox_cookies import _FF_UA
 
             # WeebCentral doesn't need cookies (returns 200 without them).
             # Use plain requests — curl-cffi impersonate strips custom HTMX headers.
@@ -700,7 +578,7 @@ class WeebCentralMetaWorker(QThread):
         try:
             import requests as _requests
             from bs4 import BeautifulSoup
-            from apumachi.firefox_cookies import _FF_UA
+            from lunanime.firefox_cookies import _FF_UA
 
             s = _requests.Session()
             s.headers.update({
@@ -817,7 +695,7 @@ _MF_BASE = "https://mangafire.to"
 
 
 def _mf_session():
-    from apumachi.firefox_cookies import make_session
+    from lunanime.firefox_cookies import make_session
     return make_session("mangafire.to", {"Referer": _MF_BASE + "/"})
 
 
@@ -936,6 +814,128 @@ class MangaFirePagesWorker(QThread):
                     urls.extend(matches)
                     if urls:
                         break
+            self.results_ready.emit(urls)
+        except Exception as e:
+            self.error.emit(str(e))
+
+# ── MangaPill workers ─────────────────────────────────────────────────────────
+
+_MP_BASE = "https://mangapill.com"
+MANGAPILL_REFERER = _MP_BASE + "/"
+
+_MP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+    "Referer": MANGAPILL_REFERER,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+class MangaPillSearchWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, query: str, limit: int = 20):
+        super().__init__()
+        self.query = query
+        self.limit = limit
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_MP_BASE}/search",
+                             params={"q": self.query, "type": "", "status": ""},
+                             headers=_MP_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            results, seen = [], set()
+            for a in soup.select("a[href^='/manga/']"):
+                href = a.get("href", "")
+                m = re.match(r'^/manga/(\d+/[^/?#]+)', href)
+                if not m or m.group(1) in seen:
+                    continue
+                manga_id = m.group(1)
+                # cards contain the cover <img>; plain text links are duplicates
+                img = a.select_one("img")
+                container = a.parent
+                title_el = (container.select_one("a div, .font-black, .mt-3 a")
+                            if container else None)
+                title = (a.get_text(strip=True)
+                         or (title_el.get_text(strip=True) if title_el else "")
+                         or manga_id.split("/")[-1].replace("-", " ").title())
+                cover = ""
+                if img:
+                    cover = img.get("data-src", "") or img.get("src", "")
+                if not img and not a.get_text(strip=True):
+                    continue
+                seen.add(manga_id)
+                results.append(MangaResult(manga_id, title, "", cover, "", []))
+                if len(results) >= self.limit:
+                    break
+            self.results_ready.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaPillChaptersWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, manga_id: str, lang: str = "en"):
+        super().__init__()
+        self.manga_id = manga_id
+        self.lang = lang
+
+    def run(self):
+        try:
+            import re
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_MP_BASE}/manga/{self.manga_id}",
+                             headers=_MP_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            chapters = []
+            for a in soup.select("a[href^='/chapters/']"):
+                href = a.get("href", "")
+                m = re.match(r'^/chapters/([^?#]+)', href)
+                if not m:
+                    continue
+                ch_id = m.group(1)
+                text = a.get_text(strip=True)
+                nm = re.search(r'(\d+(?:\.\d+)?)', text)
+                num = nm.group(1) if nm else text or "?"
+                chapters.append(MangaChapter(ch_id, num, "", "en", 0, ""))
+            # page lists newest-first; flip to ascending like other sources
+            chapters.reverse()
+            self.results_ready.emit(chapters)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MangaPillPagesWorker(QThread):
+    results_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, chapter_id: str, data_saver: bool = False):
+        super().__init__()
+        self.chapter_id = chapter_id
+        self.data_saver = data_saver
+
+    def run(self):
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            r = requests.get(f"{_MP_BASE}/chapters/{self.chapter_id}",
+                             headers=_MP_HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            urls = []
+            for img in soup.select("picture img, img.js-page"):
+                src = img.get("data-src", "") or img.get("src", "")
+                if src.startswith("http"):
+                    urls.append(src)
             self.results_ready.emit(urls)
         except Exception as e:
             self.error.emit(str(e))

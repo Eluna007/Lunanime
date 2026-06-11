@@ -10,10 +10,12 @@ from .search_view import SearchView
 from .anime_view import AnimeView
 from .home_view import HomeView
 from .seasons_view import SeasonsView
-from .manga_view import MangaView
+from .manga_view import MangaView, MANGA_SOURCES
 from .manga_reader_view import MangaReaderView
 from .downloads_view import DownloadsView
 from .settings_view import SettingsView
+from ..providers import PROVIDERS
+from .. import db
 
 
 NAV_ITEMS = [
@@ -37,8 +39,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Lunanime")
         self.resize(1100, 720)
         self.setMinimumSize(800, 560)
-        self._dark_mode = True
-        self.setStyleSheet(DARK_STYLE)
+        self._dark_mode = db.get_setting("theme") != "light"
+        self.setStyleSheet(DARK_STYLE if self._dark_mode else LIGHT_STYLE)
         self._build_ui()
         self._setup_shortcuts()
 
@@ -75,13 +77,16 @@ class MainWindow(QMainWindow):
 
         sb_layout.addStretch()
 
-        self._theme_btn = QPushButton("☀ Light")
+        self._theme_btn = QPushButton("☀ Light" if self._dark_mode else "🌙 Dark")
         self._theme_btn.setProperty("flat", True)
         self._theme_btn.clicked.connect(self._toggle_theme)
         sb_layout.addWidget(self._theme_btn)
 
-        provider_hint = QLabel("Anime: AllManga\nManga: MangaDex")
-        provider_hint.setStyleSheet("font-size: 10px; color: #444455; padding: 10px 16px;")
+        anime_names = ", ".join(n.capitalize() for n in PROVIDERS)
+        manga_names = ", ".join(name for name, _, _ in MANGA_SOURCES.values())
+        provider_hint = QLabel(f"Anime: {anime_names}\nManga: {manga_names}")
+        provider_hint.setWordWrap(True)
+        provider_hint.setStyleSheet("font-size: 10px; color: #555570; padding: 10px 16px;")
         sb_layout.addWidget(provider_hint)
 
         h.addWidget(sidebar)
@@ -182,3 +187,4 @@ class MainWindow(QMainWindow):
         else:
             self.setStyleSheet(LIGHT_STYLE)
             self._theme_btn.setText("🌙 Dark")
+        db.save_setting("theme", "dark" if self._dark_mode else "light")

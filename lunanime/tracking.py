@@ -4,7 +4,7 @@ AniList and MAL tracking clients.
 AniList  — OAuth Authorization Code + GraphQL  (requires client_id + client_secret)
 MAL      — OAuth PKCE + REST v2               (requires client_id only)
 
-Tokens are stored in the local SQLite DB via apumachi.db helpers.
+Tokens are stored in the local SQLite DB via lunanime.db helpers.
 """
 import hashlib
 import os

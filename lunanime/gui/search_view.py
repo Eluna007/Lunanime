@@ -22,6 +22,7 @@ class SearchView(QWidget):
         self._info_workers = []
         self._grid_mode = True
         self._results = []
+        self._cards = []
         self._setup_ui()
 
     def _setup_ui(self):
@@ -148,20 +149,30 @@ class SearchView(QWidget):
     def _render_results(self, results):
         self._clear_results()
         if self._grid_mode:
-            cols = max(1, self.scroll.width() // 162)
-            for i, result in enumerate(results):
+            for result in results:
                 card = AnimeCard(result)
                 card.clicked.connect(self._card_clicked)
-                self.results_layout.addWidget(card, i // cols, i % cols)
+                self._cards.append(card)
                 w = InfoWorker(self._current_provider, result.identifier)
                 w.info_ready.connect(lambda info, c=card: c.load_image(info.image) if info.image else None)
                 w.start()
                 self._info_workers.append(w)
+            self._relayout_grid()
         else:
             for result in results:
                 item = QListWidgetItem(result.name)
                 item.setData(Qt.ItemDataRole.UserRole, result)
                 self._list_widget.addItem(item)
+
+    def _relayout_grid(self):
+        cols = max(1, (self.scroll.viewport().width() - 12) // 162)
+        for i, card in enumerate(self._cards):
+            self.results_layout.addWidget(card, i // cols, i % cols)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._cards and self._grid_mode:
+            self._relayout_grid()
 
     def _list_item_clicked(self, item):
         result = item.data(Qt.ItemDataRole.UserRole)
@@ -175,6 +186,7 @@ class SearchView(QWidget):
         self.status_label.setText(f"Error: {msg}")
 
     def _clear_results(self):
+        self._cards = []
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             if item.widget():

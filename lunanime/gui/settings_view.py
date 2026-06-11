@@ -9,7 +9,8 @@ import json, os
 from .workers import OAuthWorker
 from .. import db as _db
 
-SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".apumachi_settings.json")
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".lunanime_settings.json")
+_LEGACY_SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".apumachi_settings.json")
 
 DEFAULTS = {
     "default_provider": "allmanga",
@@ -20,12 +21,13 @@ DEFAULTS = {
 
 
 def load_settings() -> dict:
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE) as f:
-                return {**DEFAULTS, **json.load(f)}
-        except Exception:
-            pass
+    for path in (SETTINGS_FILE, _LEGACY_SETTINGS_FILE):
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    return {**DEFAULTS, **json.load(f)}
+            except Exception:
+                pass
     return dict(DEFAULTS)
 
 
@@ -213,7 +215,7 @@ class SettingsView(QWidget):
             self._oauth_worker = worker
 
         def on_disconnect():
-            from apumachi import tracking
+            from lunanime import tracking
             if service == "anilist":
                 tracking.anilist_disconnect()
             else:

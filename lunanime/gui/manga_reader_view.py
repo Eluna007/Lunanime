@@ -10,8 +10,17 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint
 from PyQt6.QtGui import QPixmap, QKeyEvent, QWheelEvent
 
-from .workers import MangaPagesWorker, ImageWorker
+from .workers import (MangaPagesWorker, WeebCentralPagesWorker,
+                      MangaFirePagesWorker, MangaPillPagesWorker, ImageWorker)
 from .. import db
+
+# source key -> (pages worker, referer needed by the image CDN)
+_PAGE_SOURCES = {
+    "mangadex":    (MangaPagesWorker,       ""),
+    "weebcentral": (WeebCentralPagesWorker, "https://weebcentral.com/"),
+    "mangafire":   (MangaFirePagesWorker,   "https://mangafire.to/"),
+    "mangapill":   (MangaPillPagesWorker,   "https://mangapill.com/"),
+}
 
 _ZOOM_MIN = 0.3
 _ZOOM_MAX = 2.0
@@ -20,9 +29,10 @@ _ZOOM_STEP = 0.1
 
 class _PageLabel(QLabel):
     """Single manga page label — lazy loads image, supports rescaling."""
-    def __init__(self, url: str):
+    def __init__(self, url: str, referer: str = ""):
         super().__init__()
         self._url = url
+        self._referer = referer
         self._loaded = False
         self._raw: bytes | None = None
         self._display_width = 800
@@ -35,7 +45,7 @@ class _PageLabel(QLabel):
         if self._loaded:
             return
         self._loaded = True
-        w = ImageWorker(self._url)
+        w = ImageWorker(self._url, referer=self._referer)
         w.image_ready.connect(self._set_image)
         w.start()
         self._iw = w
@@ -253,14 +263,8 @@ class MangaReaderView(QWidget):
             self._pages_worker.terminate()
 
         source = getattr(self._manga, "source", "mangadex")
-        if source == "weebcentral":
-            from .workers import WeebCentralPagesWorker
-            self._pages_worker = WeebCentralPagesWorker(chapter.chapter_id, self._data_saver)
-        elif source == "mangafire":
-            from .workers import MangaFirePagesWorker
-            self._pages_worker = MangaFirePagesWorker(chapter.chapter_id, self._data_saver)
-        else:
-            self._pages_worker = MangaPagesWorker(chapter.chapter_id, self._data_saver)
+        pages_cls, self._page_referer = _PAGE_SOURCES.get(source, _PAGE_SOURCES["mangadex"])
+        self._pages_worker = pages_cls(chapter.chapter_id, self._data_saver)
         self._pages_worker.results_ready.connect(self._on_pages)
         self._pages_worker.error.connect(lambda e: self._on_error(e))
         self._pages_worker.start()
@@ -271,7 +275,7 @@ class MangaReaderView(QWidget):
         self._page_labels = []
         w = self._effective_width()
         for url in urls:
-            lbl = _PageLabel(url)
+            lbl = _PageLabel(url, referer=getattr(self, "_page_referer", ""))
             lbl.rescale(w)
             self._pages_layout.addWidget(lbl)
             self._page_labels.append(lbl)

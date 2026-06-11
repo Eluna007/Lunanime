@@ -48,6 +48,7 @@ class SeasonsView(QWidget):
         super().__init__(parent)
         self._worker = None
         self._search_workers = []
+        self._cards = []
         cur_season, cur_year = _current_season_and_year()
         self._season = cur_season
         self._year = cur_year
@@ -228,13 +229,18 @@ class SeasonsView(QWidget):
             self._status_label.setText("No results found.")
             return
         self._status_label.setText(f"{len(results)} anime")
-        cols = max(1, self._scroll.width() // 162)
-        for i, result in enumerate(results):
+        for result in results:
             card = AnimeCard(result)
             card.clicked.connect(self._on_card_clicked)
-            self._grid.addWidget(card, i // cols, i % cols)
+            self._cards.append(card)
             if result.image_url:
                 card.load_image(result.image_url)
+        self._relayout_grid()
+
+    def _relayout_grid(self):
+        cols = max(1, (self._scroll.viewport().width() - 12) // 162)
+        for i, card in enumerate(self._cards):
+            self._grid.addWidget(card, i // cols, i % cols)
 
     def _on_card_clicked(self, result):
         provider_name = self._provider_combo.currentData() or "allmanga"
@@ -258,6 +264,7 @@ class SeasonsView(QWidget):
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _clear_grid(self):
+        self._cards = []
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item.widget():
@@ -265,6 +272,8 @@ class SeasonsView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._cards:
+            self._relayout_grid()
 
 
 class _SeasonShim:

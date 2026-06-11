@@ -33,20 +33,9 @@ def _unpack_kwik(js: str) -> str:
         return ""
     p, a, c, k_str = match.group(1), int(match.group(2)), int(match.group(3)), match.group(4).split("|")
 
-    def base_n(num: int, b: int) -> str:
-        if num == 0:
-            return "0"
-        chars = "0123456789abcdefghijklmnopqrstuvwxyz"
-        result = ""
-        while num:
-            result = chars[num % b] + result
-            num //= b
-        return result
-
     def replace_word(word: str) -> str:
         if not word:
             return word
-        idx = int(word, a) if a <= 10 else int(word, a) if word.isdigit() else 0
         try:
             idx = int(word, a)
         except ValueError:
@@ -66,6 +55,22 @@ class AnimePaheProvider(BaseProvider):
     NAME = "animepahe"
     BASE_URL = BASE_URL
     FILTER_CAPS = FilterCapabilities.NO_QUERY
+
+    def _generate_new_session(self):
+        """animepahe.ru sits behind DDoS-Guard; reuse the user's Firefox
+        cookies (same approach as the WeebCentral/MangaFire scrapers)."""
+        session = super()._generate_new_session()
+        session.headers.update(HEADERS)
+        try:
+            from lunanime.firefox_cookies import _find_firefox_profile, _read_cookies
+            profile = _find_firefox_profile()
+            if profile:
+                for domain in ("animepahe.ru", "kwik.si"):
+                    for name, value in _read_cookies(profile, domain).items():
+                        session.cookies.set(name, value, domain=f".{domain}")
+        except Exception:
+            pass
+        return session
 
     def get_search(self, query: str, filters: Filters = Filters()) -> List[ProviderSearchResult]:
         try:

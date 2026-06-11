@@ -93,7 +93,10 @@ class HomeView(QWidget):
         for name in list_provider_names():
             self._provider_combo.addItem(name.capitalize(), name)
         prov_row.addWidget(self._provider_combo)
-        prov_row.addStretch()
+        self._status = QLabel("")
+        self._status.setObjectName("subtitleLabel")
+        prov_row.addSpacing(12)
+        prov_row.addWidget(self._status, 1)
         layout.addLayout(prov_row)
 
         # Continue Watching
@@ -237,8 +240,7 @@ class HomeView(QWidget):
             return
 
         title = anilist_result.name
-        self._seasonal_section.set_placeholder(f"Searching '{title}'...")
-        self._trending_section.set_placeholder(f"Searching '{title}'...")
+        self._status.setText(f"Searching '{title}' on {provider_name}…")
 
         w = SearchWorker(provider, title)
         w.results_ready.connect(lambda results, p=provider, t=title: self._on_search_done(p, results, t))
@@ -247,14 +249,12 @@ class HomeView(QWidget):
         self._workers.append(w)
 
     def _on_search_done(self, provider, results, title):
-        # Reload sections (search placeholder was temporary)
-        self._load_seasonal()
-        self._load_trending()
         if not results:
+            self._status.setText(f"'{title}' not found on this provider.")
             return
+        self._status.setText("")
         # Open the best match (first result)
         self.anime_selected.emit(provider, results[0])
 
     def _on_search_error(self, err):
-        self._load_seasonal()
-        self._load_trending()
+        self._status.setText(f"Search error: {err}")
