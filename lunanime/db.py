@@ -84,9 +84,16 @@ def init_db():
                 chapter_num TEXT NOT NULL,
                 title TEXT NOT NULL,
                 marked_at TEXT NOT NULL,
+                source TEXT,
+                cover_url TEXT,
                 PRIMARY KEY(manga_id, chapter_id)
             );
         """)
+        # Migrate pre-existing databases
+        cols = {r[1] for r in c.execute("PRAGMA table_info(manga_history)")}
+        for col in ("source", "cover_url"):
+            if col not in cols:
+                c.execute(f"ALTER TABLE manga_history ADD COLUMN {col} TEXT")
 
 
 # ── History ──────────────────────────────────────────────────────────────────
@@ -295,13 +302,33 @@ def is_episode_watched(provider, identifier, episode) -> bool:
 
 # ── Manga read history ────────────────────────────────────────────────────────
 
-def mark_chapter_read(manga_id, chapter_id, chapter_num, title):
+def mark_chapter_read(manga_id, chapter_id, chapter_num, title,
+                      source=None, cover_url=None):
     with _conn() as c:
         c.execute("""
-            INSERT OR REPLACE INTO manga_history
-            (manga_id, chapter_id, chapter_num, title, marked_at)
-            VALUES (?,?,?,?,?)
-        """, (manga_id, chapter_id, chapter_num, title, datetime.now().isoformat()))
+            INSERT INTO manga_history
+            (manga_id, chapter_id, chapter_num, title, marked_at, source, cover_url)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(manga_id, chapter_id) DO UPDATE SET
+                marked_at = excluded.marked_at,
+                source    = COALESCE(excluded.source, source),
+                cover_url = COALESCE(excluded.cover_url, cover_url)
+        """, (manga_id, chapter_id, chapter_num, title,
+              datetime.now().isoformat(), source, cover_url))
+
+
+def get_continue_reading(limit=20):
+    """Most recently read manga, one row each, with last chapter info."""
+    with _conn() as c:
+        rows = c.execute("""
+            SELECT manga_id, title, chapter_num, source, cover_url,
+                   MAX(marked_at) as marked_at
+            FROM manga_history
+            GROUP BY manga_id
+            ORDER BY marked_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_read_chapters(manga_id) -> set:

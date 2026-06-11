@@ -129,7 +129,7 @@ class SearchView(QWidget):
         self.status_label.setText("Searching...")
 
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
+            self._worker.retire()
 
         filters = self._filter_widget.get_filters() if self._filter_widget.isVisible() else None
         self._worker = SearchWorker(self._current_provider, query, filters=filters)

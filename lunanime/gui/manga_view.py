@@ -6,17 +6,19 @@ Manga search + detail view.
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QScrollArea, QGridLayout, QListWidget,
-    QListWidgetItem, QSplitter, QComboBox, QFrame,
+    QListWidgetItem, QSplitter, QComboBox, QFrame, QStackedWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QBrush, QColor
 
 from .anime_card import AnimeCard
 from .workers import (MangaSearchWorker, MangaChaptersWorker,
                       ImageWorker, MangaResult, MangaChapter,
                       WeebCentralSearchWorker, WeebCentralChaptersWorker, WeebCentralMetaWorker,
                       MangaFireSearchWorker, MangaFireChaptersWorker,
-                      MangaPillSearchWorker, MangaPillChaptersWorker)
+                      MangaPillSearchWorker, MangaPillChaptersWorker,
+                      MangaDexBrowseWorker)
+from .home_view import _HScrollSection
 from .. import db
 
 # source key -> (display name, search worker, chapters worker)
@@ -40,7 +42,10 @@ class MangaView(QWidget):
         self._chapters        = []
         self._result_cards    = []
         self._source          = "mangadex"
+        self._browse_workers  = []
+        self._discover_loaded = False
         self._setup_ui()
+        self._show_discover()
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -61,6 +66,7 @@ class MangaView(QWidget):
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("Search manga on MangaDex…")
         self._search_input.returnPressed.connect(self._do_search)
+        self._search_input.textChanged.connect(self._on_search_text_changed)
         bar.addWidget(self._search_input, 1)
 
         search_btn = QPushButton("Search")
@@ -87,7 +93,33 @@ class MangaView(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
 
-        # Left: results grid
+        # Left: stack of discover page (0) and results grid (1)
+        self._left_stack = QStackedWidget()
+
+        discover_scroll = QScrollArea()
+        discover_scroll.setWidgetResizable(True)
+        discover_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        discover_inner = QWidget()
+        dl = QVBoxLayout(discover_inner)
+        dl.setContentsMargins(16, 10, 8, 10)
+        dl.setSpacing(18)
+
+        self._continue_section = _HScrollSection("▶  Continue Reading")
+        self._continue_section.card_clicked.connect(self._on_discover_card)
+        dl.addWidget(self._continue_section)
+
+        self._trending_section = _HScrollSection("🔥  Trending  (MangaDex)")
+        self._trending_section.card_clicked.connect(self._on_discover_card)
+        dl.addWidget(self._trending_section)
+
+        self._hot_section = _HScrollSection("⭐  Hot New  (MangaDex)")
+        self._hot_section.card_clicked.connect(self._on_discover_card)
+        dl.addWidget(self._hot_section)
+
+        dl.addStretch()
+        discover_scroll.setWidget(discover_inner)
+        self._left_stack.addWidget(discover_scroll)   # 0
+
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -97,7 +129,9 @@ class MangaView(QWidget):
         self._results_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self._results_grid.setContentsMargins(16, 10, 8, 10)
         left_scroll.setWidget(self._results_container)
-        splitter.addWidget(left_scroll)
+        self._left_stack.addWidget(left_scroll)       # 1
+
+        splitter.addWidget(self._left_stack)
 
         # Right: manga detail + chapter list
         right = QWidget()
@@ -171,7 +205,67 @@ class MangaView(QWidget):
         splitter.setSizes([380, 460])
         root.addWidget(splitter, 1)
 
+    # ── Discover (trending / hot / continue reading) ─────────────────────────
+
+    def _show_discover(self):
+        self._left_stack.setCurrentIndex(0)
+        self._status.setText("Browse, or search for a manga title.")
+        self.refresh_continue_reading()
+        if not self._discover_loaded:
+            self._discover_loaded = True
+            self._load_browse_section(self._trending_section, "trending")
+            self._load_browse_section(self._hot_section, "hot")
+
+    def _load_browse_section(self, section, mode):
+        section.set_placeholder("Loading…")
+        w = MangaDexBrowseWorker(mode=mode, limit=20)
+        w.results_ready.connect(lambda r, sec=section: self._fill_section(sec, r))
+        w.error.connect(lambda e, sec=section: sec.set_placeholder(f"Error: {e}"))
+        w.start()
+        self._browse_workers.append(w)
+
+    def _fill_section(self, section, results):
+        section.clear()
+        if not results:
+            section.set_placeholder("Nothing found.")
+            return
+        for manga in results:
+            manga.source = "mangadex"
+            card = section.add_card(manga)
+            if manga.cover_url:
+                card.load_image(manga.cover_url)
+
+    def refresh_continue_reading(self):
+        entries = db.get_continue_reading(limit=20)
+        self._continue_section.clear()
+        if not entries:
+            self._continue_section.set_placeholder("Nothing read yet — chapters you open show up here.")
+            return
+        for e in entries:
+            manga = MangaResult(e["manga_id"], e["title"],
+                                "", e.get("cover_url") or "", "", [])
+            manga.source = e.get("source") or "mangadex"
+            card = self._continue_section.add_card(manga)
+            card.setToolTip(f"{e['title']} — Ch. {e['chapter_num']}")
+            if manga.cover_url:
+                card.load_image(manga.cover_url)
+
+    def _on_discover_card(self, manga):
+        source = getattr(manga, "source", "mangadex")
+        if source not in MANGA_SOURCES:
+            source = "mangadex"
+        self._source_combo.blockSignals(True)
+        self._source_combo.setCurrentIndex(list(MANGA_SOURCES).index(source))
+        self._source_combo.blockSignals(False)
+        self._source = source
+        self._on_manga_selected(manga)
+
     # ── Search ────────────────────────────────────────────────────────────────
+
+    def _on_search_text_changed(self, text):
+        if not text.strip() and self._left_stack.currentIndex() == 1:
+            self._clear_results()
+            self._show_discover()
 
     def _on_source_changed(self):
         self._source = self._source_combo.currentData()
@@ -180,17 +274,19 @@ class MangaView(QWidget):
         self._clear_results()
         self._current_manga = None
         self._ch_list.clear()
-        self._status.setText("Search for a manga title to get started.")
+        if not self._search_input.text().strip():
+            self._show_discover()
 
     def _do_search(self):
         query = self._search_input.text().strip()
         if not query:
             return
         self._clear_results()
+        self._left_stack.setCurrentIndex(1)
         source_name, search_cls, _ = MANGA_SOURCES[self._source]
         self._status.setText(f"Searching {source_name}…")
         if self._search_worker and self._search_worker.isRunning():
-            self._search_worker.terminate()
+            self._search_worker.retire()
         self._search_worker = search_cls(query)
         self._search_worker.results_ready.connect(self._on_results)
         self._search_worker.error.connect(lambda e: self._status.setText(f"Error: {e}"))
@@ -248,6 +344,8 @@ class MangaView(QWidget):
     def _on_wc_meta(self, cover_url: str, description: str):
         if description and self._current_manga:
             self._manga_desc.setText(description)
+        if cover_url and self._current_manga:
+            self._current_manga.cover_url = cover_url
         if cover_url:
             w = ImageWorker(cover_url)
             w.image_ready.connect(self._set_cover)
@@ -270,7 +368,7 @@ class MangaView(QWidget):
         self._ch_list.addItem(QListWidgetItem("Loading chapters…"))
         lang = self._lang_combo.currentData()
         if self._chapters_worker and self._chapters_worker.isRunning():
-            self._chapters_worker.terminate()
+            self._chapters_worker.retire()
         chapters_cls = MANGA_SOURCES[self._source][2]
         self._chapters_worker = chapters_cls(self._current_manga.manga_id, lang)
         self._chapters_worker.results_ready.connect(self._on_chapters)
@@ -293,7 +391,7 @@ class MangaView(QWidget):
             item = QListWidgetItem(prefix + ch_label)
             item.setData(Qt.ItemDataRole.UserRole, ch)
             if is_read:
-                item.setForeground(item.foreground().__class__("#86efac"))
+                item.setForeground(QBrush(QColor("#86efac")))
             self._ch_list.addItem(item)
 
     # ── Reading ───────────────────────────────────────────────────────────────
@@ -332,7 +430,9 @@ class MangaView(QWidget):
                 db.unmark_chapter_read(self._current_manga.manga_id, ch.chapter_id)
             else:
                 db.mark_chapter_read(self._current_manga.manga_id, ch.chapter_id,
-                                     ch.chapter_num, self._current_manga.title)
+                                     ch.chapter_num, self._current_manga.title,
+                                     source=self._source,
+                                     cover_url=self._current_manga.cover_url or None)
             self._on_chapters(self._chapters)
         elif action == mark_up_action:
             row = self._ch_list.row(item)
@@ -340,7 +440,9 @@ class MangaView(QWidget):
                 c = self._ch_list.item(i).data(Qt.ItemDataRole.UserRole)
                 if c:
                     db.mark_chapter_read(self._current_manga.manga_id, c.chapter_id,
-                                         c.chapter_num, self._current_manga.title)
+                                         c.chapter_num, self._current_manga.title,
+                                         source=self._source,
+                                         cover_url=self._current_manga.cover_url or None)
             self._on_chapters(self._chapters)
 
     def focus_search(self):

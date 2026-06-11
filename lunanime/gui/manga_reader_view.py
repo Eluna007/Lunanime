@@ -260,7 +260,7 @@ class MangaReaderView(QWidget):
         self._progress.setVisible(True)
 
         if self._pages_worker and self._pages_worker.isRunning():
-            self._pages_worker.terminate()
+            self._pages_worker.retire()
 
         source = getattr(self._manga, "source", "mangadex")
         pages_cls, self._page_referer = _PAGE_SOURCES.get(source, _PAGE_SOURCES["mangadex"])
@@ -284,7 +284,9 @@ class MangaReaderView(QWidget):
         self._scroll.verticalScrollBar().setValue(0)
         if self._manga and self._chapter:
             db.mark_chapter_read(self._manga.manga_id, self._chapter.chapter_id,
-                                 self._chapter.chapter_num, self._manga.title)
+                                 self._chapter.chapter_num, self._manga.title,
+                                 source=getattr(self._manga, "source", "mangadex"),
+                                 cover_url=getattr(self._manga, "cover_url", "") or None)
         idx = self._ch_combo.currentIndex()
         self._prev_btn.setEnabled(idx > 0)
         self._next_btn.setEnabled(idx < len(self._chapters) - 1)

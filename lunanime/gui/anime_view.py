@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QScrollArea, QSplitter,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QBrush, QColor
 
 from anipy_api.provider.base import LanguageTypeEnum
 from anipy_api.player.player import get_player, list_players
@@ -301,7 +301,7 @@ class AnimeView(QWidget):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, ep)
             if is_watched:
-                item.setForeground(item.foreground().__class__("#86efac"))
+                item.setForeground(QBrush(QColor("#86efac")))
             self.ep_list.addItem(item)
 
         # Show resume hint and select last episode
@@ -393,7 +393,7 @@ class AnimeView(QWidget):
             # Auto-play watcher
             if self.autoplay_check.isChecked():
                 self._autoplay_worker = AutoPlayWorker(player)
-                self._autoplay_worker.finished.connect(self._on_player_finished)
+                self._autoplay_worker.done.connect(self._on_player_finished)
                 self._autoplay_worker.start()
 
         except Exception as e:
@@ -419,7 +419,7 @@ class AnimeView(QWidget):
             if ep == episode:
                 ep_label = f"Episode {int(ep) if ep == int(ep) else ep}"
                 item.setText("✓ " + ep_label + "  (last played)")
-                item.setForeground(item.foreground().__class__("#86efac"))
+                item.setForeground(QBrush(QColor("#86efac")))
                 break
 
     def _ep_context_menu(self, pos):
@@ -494,7 +494,7 @@ class AnimeView(QWidget):
         worker = DownloadWorker(stream, download_path)
 
         # Log to db when done
-        worker.finished.connect(
+        worker.done.connect(
             lambda path: db.log_download(
                 self._provider.NAME, self._result.identifier,
                 self._result.name, episode, lang.value, path
